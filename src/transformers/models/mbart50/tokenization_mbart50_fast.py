@@ -14,7 +14,6 @@
 # limitations under the License.
 
 import os
-from contextlib import contextmanager
 from shutil import copyfile
 from typing import List, Optional, Tuple
 
@@ -98,10 +97,8 @@ class MBart50TokenizerFast(PreTrainedTokenizerFast):
     >>> tokenizer = MBart50TokenizerFast.from_pretrained("facebook/mbart-large-50", src_lang="en_XX", tgt_lang="ro_RO")
     >>> src_text = " UN Chief Says There Is No Military Solution in Syria"
     >>> tgt_text = "Şeful ONU declară că nu există o soluţie militară în Siria"
-    >>> model_inputs = tokenizer(src_text, return_tensors="pt")
-    >>> with tokenizer.as_target_tokenizer():
-    ...     labels = tokenizer(tgt_text, return_tensors="pt").input_ids
-    >>> # model(**model_inputs, labels=labels) should work
+    >>> model_inputs = tokenizer(src_text, text_target=tgt_text, return_tensors="pt")
+    >>> # model(**model_inputs) should work
     ```"""
 
     vocab_files_names = VOCAB_FILES_NAMES
@@ -125,12 +122,12 @@ class MBart50TokenizerFast(PreTrainedTokenizerFast):
         unk_token="<unk>",
         pad_token="<pad>",
         mask_token="<mask>",
-        **kwargs
+        **kwargs,
     ):
         # Mask token behave like a normal word, i.e. include the space before it
         mask_token = AddedToken(mask_token, lstrip=True, rstrip=False) if isinstance(mask_token, str) else mask_token
 
-        kwargs["additional_special_tokens"] = kwargs.get("additional_special_tokens", [])
+        kwargs["additional_special_tokens"] = kwargs.get("additional_special_tokens", []) or []
         kwargs["additional_special_tokens"] += [
             code for code in FAIRSEQ_LANGUAGE_CODES if code not in kwargs["additional_special_tokens"]
         ]
@@ -150,7 +147,6 @@ class MBart50TokenizerFast(PreTrainedTokenizerFast):
         )
 
         self.vocab_file = vocab_file
-        self.can_save_slow_tokenizer = False if not self.vocab_file else True
 
         self.lang_code_to_id = {
             lang_code: self.convert_tokens_to_ids(lang_code) for lang_code in FAIRSEQ_LANGUAGE_CODES
@@ -160,6 +156,10 @@ class MBart50TokenizerFast(PreTrainedTokenizerFast):
         self.tgt_lang = tgt_lang
         self.cur_lang_code_id = self.lang_code_to_id[self._src_lang]
         self.set_src_lang_special_tokens(self._src_lang)
+
+    @property
+    def can_save_slow_tokenizer(self) -> bool:
+        return os.path.isfile(self.vocab_file) if self.vocab_file else False
 
     @property
     def src_lang(self) -> str:
@@ -211,15 +211,11 @@ class MBart50TokenizerFast(PreTrainedTokenizerFast):
         self.tgt_lang = tgt_lang
         return super().prepare_seq2seq_batch(src_texts, tgt_texts, **kwargs)
 
-    @contextmanager
-    def as_target_tokenizer(self):
-        """
-        Temporarily sets the tokenizer for encoding the targets. Useful for tokenizer associated to
-        sequence-to-sequence models that need a slightly different processing for the labels.
-        """
-        self.set_tgt_lang_special_tokens(self.tgt_lang)
-        yield
-        self.set_src_lang_special_tokens(self.src_lang)
+    def _switch_to_input_mode(self):
+        return self.set_src_lang_special_tokens(self.src_lang)
+
+    def _switch_to_target_mode(self):
+        return self.set_tgt_lang_special_tokens(self.tgt_lang)
 
     def set_src_lang_special_tokens(self, src_lang: str) -> None:
         """Reset the special tokens to the source lang setting. prefix=[src_lang_code] and suffix=[eos]."""

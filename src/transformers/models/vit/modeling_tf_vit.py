@@ -15,9 +15,11 @@
 """ TF 2.0 ViT model."""
 
 
+from __future__ import annotations
+
 import collections.abc
 import math
-from typing import Dict, Optional, Tuple, Union
+from typing import Optional, Tuple, Union
 
 import numpy as np
 import tensorflow as tf
@@ -41,7 +43,6 @@ logger = logging.get_logger(__name__)
 
 # General docstring
 _CONFIG_FOR_DOC = "ViTConfig"
-_FEAT_EXTRACTOR_FOR_DOC = "ViTFeatureExtractor"
 
 # Base docstring
 _CHECKPOINT_FOR_DOC = "google/vit-base-patch16-224-in21k"
@@ -50,19 +51,6 @@ _EXPECTED_OUTPUT_SHAPE = [1, 197, 768]
 # Image classification docstring
 _IMAGE_CLASS_CHECKPOINT = "google/vit-base-patch16-224"
 _IMAGE_CLASS_EXPECTED_OUTPUT = "Egyptian cat"
-
-
-# Inspired by
-# https://github.com/rwightman/pytorch-image-models/blob/b9bd960a032c75ca6b808ddeed76bee5f3ed4972/timm/models/layers/helpers.py
-# From PyTorch internals
-def to_2tuple(x):
-    if isinstance(x, collections.abc.Iterable):
-        return x
-    return (x, x)
-
-
-# Based on timm implementation, which can be found here:
-# https://github.com/rwightman/pytorch-image-models/blob/master/timm/models/vision_transformer.py
 
 
 class TFViTEmbeddings(tf.keras.layers.Layer):
@@ -74,19 +62,21 @@ class TFViTEmbeddings(tf.keras.layers.Layer):
     def __init__(self, config: ViTConfig, **kwargs):
         super().__init__(**kwargs)
 
-        self.patch_embeddings = TFPatchEmbeddings(config, name="patch_embeddings")
+        self.patch_embeddings = TFViTPatchEmbeddings(config, name="patch_embeddings")
         self.dropout = tf.keras.layers.Dropout(rate=config.hidden_dropout_prob)
         self.config = config
 
     def build(self, input_shape: tf.TensorShape):
-
         num_patches = self.patch_embeddings.num_patches
         self.cls_token = self.add_weight(
-            shape=(1, 1, self.config.hidden_size), initializer="zeros", trainable=True, name="cls_token"
+            shape=(1, 1, self.config.hidden_size),
+            initializer=get_initializer(self.config.initializer_range),
+            trainable=True,
+            name="cls_token",
         )
         self.position_embeddings = self.add_weight(
             shape=(1, num_patches + 1, self.config.hidden_size),
-            initializer="zeros",
+            initializer=get_initializer(self.config.initializer_range),
             trainable=True,
             name="position_embeddings",
         )
@@ -103,19 +93,21 @@ class TFViTEmbeddings(tf.keras.layers.Layer):
         """
 
         batch_size, seq_len, dim = shape_list(embeddings)
-        npatch = seq_len - 1
+        num_patches = seq_len - 1
 
-        _, N, _ = shape_list(self.position_embeddings)
-        N -= 1
+        _, num_positions, _ = shape_list(self.position_embeddings)
+        num_positions -= 1
 
-        if npatch == N and height == width:
+        if num_patches == num_positions and height == width:
             return self.position_embeddings
         class_pos_embed = self.position_embeddings[:, :1]
         patch_pos_embed = self.position_embeddings[:, 1:]
         h0 = height // self.config.patch_size
         w0 = width // self.config.patch_size
         patch_pos_embed = tf.image.resize(
-            images=tf.reshape(patch_pos_embed, shape=(1, int(math.sqrt(N)), int(math.sqrt(N)), dim)),
+            images=tf.reshape(
+                patch_pos_embed, shape=(1, int(math.sqrt(num_positions)), int(math.sqrt(num_positions)), dim)
+            ),
             size=(h0, w0),
             method="bicubic",
         )
@@ -150,27 +142,31 @@ class TFViTEmbeddings(tf.keras.layers.Layer):
 
 # Based on timm implementation, which can be found here:
 # https://github.com/rwightman/pytorch-image-models/blob/master/timm/models/vision_transformer.py
-class TFPatchEmbeddings(tf.keras.layers.Layer):
+class TFViTPatchEmbeddings(tf.keras.layers.Layer):
     """
-    Image to Patch Embedding.
+    This class turns `pixel_values` of shape `(batch_size, num_channels, height, width)` into the initial
+    `hidden_states` (patch embeddings) of shape `(batch_size, seq_length, hidden_size)` to be consumed by a
+    Transformer.
     """
 
     def __init__(self, config: ViTConfig, **kwargs):
         super().__init__(**kwargs)
-        image_size = to_2tuple(config.image_size)
-        patch_size = to_2tuple(config.patch_size)
+        image_size, patch_size = config.image_size, config.patch_size
+        num_channels, hidden_size = config.num_channels, config.hidden_size
+
+        image_size = image_size if isinstance(image_size, collections.abc.Iterable) else (image_size, image_size)
+        patch_size = patch_size if isinstance(patch_size, collections.abc.Iterable) else (patch_size, patch_size)
         num_patches = (image_size[1] // patch_size[1]) * (image_size[0] // patch_size[0])
         self.image_size = image_size
         self.patch_size = patch_size
         self.num_patches = num_patches
-        self.num_channels = config.num_channels
-        self.embed_dim = config.hidden_size
+        self.num_channels = num_channels
         self.config = config
 
         self.projection = tf.keras.layers.Conv2D(
-            filters=self.embed_dim,
+            filters=hidden_size,
             kernel_size=patch_size,
-            strides=self.patch_size,
+            strides=patch_size,
             padding="valid",
             data_format="channels_last",
             use_bias=True,
@@ -183,8 +179,12 @@ class TFPatchEmbeddings(tf.keras.layers.Layer):
         self, pixel_values: tf.Tensor, interpolate_pos_encoding: bool = False, training: bool = False
     ) -> tf.Tensor:
         batch_size, num_channels, height, width = shape_list(pixel_values)
+        if tf.executing_eagerly() and num_channels != self.num_channels:
+            raise ValueError(
+                "Make sure that the channel dimension of the pixel values match with the one set in the configuration."
+            )
         if not interpolate_pos_encoding:
-            if getattr(height, "numpy", None) and getattr(width, "numpy", None):
+            if tf.executing_eagerly():
                 if height != self.image_size[0] or width != self.image_size[1]:
                     raise ValueError(
                         f"Input image size ({height}*{width}) doesn't match model"
@@ -201,9 +201,9 @@ class TFPatchEmbeddings(tf.keras.layers.Layer):
         # Change the 2D spatial dimensions to a single temporal dimension.
         # shape = (batch_size, num_patches, out_channels=embed_dim)
         num_patches = (width // self.patch_size[1]) * (height // self.patch_size[0])
-        x = tf.reshape(tensor=projection, shape=(batch_size, num_patches, -1))
+        embeddings = tf.reshape(tensor=projection, shape=(batch_size, num_patches, -1))
 
-        return x
+        return embeddings
 
 
 class TFViTSelfAttention(tf.keras.layers.Layer):
@@ -489,15 +489,14 @@ class TFViTMainLayer(tf.keras.layers.Layer):
     @unpack_inputs
     def call(
         self,
-        pixel_values: Optional[TFModelInputType] = None,
-        head_mask: Optional[Union[np.ndarray, tf.Tensor]] = None,
+        pixel_values: TFModelInputType | None = None,
+        head_mask: np.ndarray | tf.Tensor | None = None,
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         interpolate_pos_encoding: Optional[bool] = None,
         return_dict: Optional[bool] = None,
         training: bool = False,
     ) -> Union[TFBaseModelOutputWithPooling, Tuple[tf.Tensor]]:
-
         if pixel_values is None:
             raise ValueError("You have to specify pixel_values")
 
@@ -551,38 +550,6 @@ class TFViTPreTrainedModel(TFPreTrainedModel):
     base_model_prefix = "vit"
     main_input_name = "pixel_values"
 
-    @property
-    def dummy_inputs(self) -> Dict[str, tf.Tensor]:
-        """
-        Dummy inputs to build the network.
-
-        Returns:
-            `Dict[str, tf.Tensor]`: The dummy inputs.
-        """
-        VISION_DUMMY_INPUTS = tf.random.uniform(
-            shape=(3, self.config.num_channels, self.config.image_size, self.config.image_size), dtype=tf.float32
-        )
-        return {"pixel_values": tf.constant(VISION_DUMMY_INPUTS)}
-
-    @tf.function(
-        input_signature=[
-            {
-                "pixel_values": tf.TensorSpec((None, None, None, None), tf.float32, name="pixel_values"),
-            }
-        ]
-    )
-    def serving(self, inputs):
-        """
-        Method used for serving the model.
-
-        Args:
-            inputs (`Dict[str, tf.Tensor]`):
-                The input of the saved model as a dictionary of tensors.
-        """
-        output = self.call(inputs)
-
-        return self.serving_output(output)
-
 
 VIT_START_DOCSTRING = r"""
 
@@ -596,13 +563,27 @@ VIT_START_DOCSTRING = r"""
 
     <Tip>
 
-    TF 2.0 models accepts two formats as inputs:
+    TensorFlow models and layers in `transformers` accept two formats as input:
 
     - having all inputs as keyword arguments (like PyTorch models), or
-    - having all inputs as a list, tuple or dict in the first positional arguments.
+    - having all inputs as a list, tuple or dict in the first positional argument.
 
-    This second option is useful when using [`tf.keras.Model.fit`] method which currently requires having all the
-    tensors in the first argument of the model call function: `model(inputs)`.
+    The reason the second format is supported is that Keras methods prefer this format when passing inputs to models
+    and layers. Because of this support, when using methods like `model.fit()` things should "just work" for you - just
+    pass your inputs and labels in any format that `model.fit()` supports! If, however, you want to use the second
+    format outside of Keras methods like `fit()` and `predict()`, such as when creating your own layers or models with
+    the Keras `Functional` API, there are three possibilities you can use to gather all the input Tensors in the first
+    positional argument:
+
+    - a single Tensor with `pixel_values` only and nothing else: `model(pixel_values)`
+    - a list of varying length with one or several input Tensors IN THE ORDER given in the docstring:
+    `model([pixel_values, attention_mask])` or `model([pixel_values, attention_mask, token_type_ids])`
+    - a dictionary with one or several input Tensors associated to the input names given in the docstring:
+    `model({"pixel_values": pixel_values, "token_type_ids": token_type_ids})`
+
+    Note that when creating models and layers with
+    [subclassing](https://keras.io/guides/making_new_layers_and_models_via_subclassing/) then you don't need to worry
+    about any of this, as you can just pass inputs like you would to any other Python function!
 
     </Tip>
 
@@ -615,8 +596,8 @@ VIT_START_DOCSTRING = r"""
 VIT_INPUTS_DOCSTRING = r"""
     Args:
         pixel_values (`np.ndarray`, `tf.Tensor`, `List[tf.Tensor]` ``Dict[str, tf.Tensor]` or `Dict[str, np.ndarray]` and each example must have the shape `(batch_size, num_channels, height, width)`):
-            Pixel values. Pixel values can be obtained using [`ViTFeatureExtractor`]. See
-            [`ViTFeatureExtractor.__call__`] for details.
+            Pixel values. Pixel values can be obtained using [`AutoImageProcessor`]. See [`ViTImageProcessor.__call__`]
+            for details.
 
         head_mask (`np.ndarray` or `tf.Tensor` of shape `(num_heads,)` or `(num_layers, num_heads)`, *optional*):
             Mask to nullify selected heads of the self-attention modules. Mask values selected in `[0, 1]`:
@@ -656,7 +637,6 @@ class TFViTModel(TFViTPreTrainedModel):
     @unpack_inputs
     @add_start_docstrings_to_model_forward(VIT_INPUTS_DOCSTRING)
     @add_code_sample_docstrings(
-        processor_class=_FEAT_EXTRACTOR_FOR_DOC,
         checkpoint=_CHECKPOINT_FOR_DOC,
         output_type=TFBaseModelOutputWithPooling,
         config_class=_CONFIG_FOR_DOC,
@@ -665,15 +645,14 @@ class TFViTModel(TFViTPreTrainedModel):
     )
     def call(
         self,
-        pixel_values: Optional[TFModelInputType] = None,
-        head_mask: Optional[Union[np.ndarray, tf.Tensor]] = None,
+        pixel_values: TFModelInputType | None = None,
+        head_mask: np.ndarray | tf.Tensor | None = None,
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         interpolate_pos_encoding: Optional[bool] = None,
         return_dict: Optional[bool] = None,
         training: bool = False,
     ) -> Union[TFBaseModelOutputWithPooling, Tuple[tf.Tensor]]:
-
         outputs = self.vit(
             pixel_values=pixel_values,
             head_mask=head_mask,
@@ -685,17 +664,6 @@ class TFViTModel(TFViTPreTrainedModel):
         )
 
         return outputs
-
-    def serving_output(self, output: TFBaseModelOutputWithPooling) -> TFBaseModelOutputWithPooling:
-        hs = tf.convert_to_tensor(output.hidden_states) if self.config.output_hidden_states else None
-        attns = tf.convert_to_tensor(output.attentions) if self.config.output_attentions else None
-
-        return TFBaseModelOutputWithPooling(
-            last_hidden_state=output.last_hidden_state,
-            pooler_output=output.pooler_output,
-            hidden_states=hs,
-            attentions=attns,
-        )
 
 
 class TFViTPooler(tf.keras.layers.Layer):
@@ -722,6 +690,14 @@ class TFViTPooler(tf.keras.layers.Layer):
     """
     ViT Model transformer with an image classification head on top (a linear layer on top of the final hidden state of
     the [CLS] token) e.g. for ImageNet.
+
+    <Tip>
+
+        Note that it's possible to fine-tune ViT on higher resolution images than the ones it has been trained on, by
+        setting `interpolate_pos_encoding` to `True` in the forward of the model. This will interpolate the pre-trained
+        position embeddings to the higher resolution.
+
+    </Tip>
     """,
     VIT_START_DOCSTRING,
 )
@@ -742,7 +718,6 @@ class TFViTForImageClassification(TFViTPreTrainedModel, TFSequenceClassification
     @unpack_inputs
     @add_start_docstrings_to_model_forward(VIT_INPUTS_DOCSTRING)
     @add_code_sample_docstrings(
-        processor_class=_FEAT_EXTRACTOR_FOR_DOC,
         checkpoint=_IMAGE_CLASS_CHECKPOINT,
         output_type=TFSequenceClassifierOutput,
         config_class=_CONFIG_FOR_DOC,
@@ -750,13 +725,13 @@ class TFViTForImageClassification(TFViTPreTrainedModel, TFSequenceClassification
     )
     def call(
         self,
-        pixel_values: Optional[TFModelInputType] = None,
-        head_mask: Optional[Union[np.ndarray, tf.Tensor]] = None,
+        pixel_values: TFModelInputType | None = None,
+        head_mask: np.ndarray | tf.Tensor | None = None,
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         interpolate_pos_encoding: Optional[bool] = None,
         return_dict: Optional[bool] = None,
-        labels: Optional[Union[np.ndarray, tf.Tensor]] = None,
+        labels: np.ndarray | tf.Tensor | None = None,
         training: Optional[bool] = False,
     ) -> Union[TFSequenceClassifierOutput, Tuple[tf.Tensor]]:
         r"""
@@ -789,9 +764,3 @@ class TFViTForImageClassification(TFViTPreTrainedModel, TFSequenceClassification
             hidden_states=outputs.hidden_states,
             attentions=outputs.attentions,
         )
-
-    def serving_output(self, output: TFSequenceClassifierOutput) -> TFSequenceClassifierOutput:
-        hs = tf.convert_to_tensor(output.hidden_states) if self.config.output_hidden_states else None
-        attns = tf.convert_to_tensor(output.attentions) if self.config.output_attentions else None
-
-        return TFSequenceClassifierOutput(logits=output.logits, hidden_states=hs, attentions=attns)

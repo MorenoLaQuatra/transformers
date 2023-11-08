@@ -27,7 +27,6 @@ SAMPLE_VOCAB = get_tests_dir("fixtures/test_sentencepiece.model")
 @require_sentencepiece
 @require_tokenizers
 class XLNetTokenizationTest(TokenizerTesterMixin, unittest.TestCase):
-
     tokenizer_class = XLNetTokenizer
     rust_tokenizer_class = XLNetTokenizerFast
     test_rust_tokenizer = True
@@ -38,7 +37,6 @@ class XLNetTokenizationTest(TokenizerTesterMixin, unittest.TestCase):
 
         # We have a SentencePiece fixture for testing
         tokenizer = XLNetTokenizer(SAMPLE_VOCAB, keep_accents=True)
-        tokenizer.sanitize_special_tokens()
         tokenizer.save_pretrained(self.tmpdirname)
 
     def test_convert_token_and_id(self):

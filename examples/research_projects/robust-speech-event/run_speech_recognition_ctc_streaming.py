@@ -103,8 +103,8 @@ class ModelArguments:
         default=0.05,
         metadata={
             "help": (
-                "Probability of each feature vector along the time axis to be chosen as the start of the vector"
-                "span to be masked. Approximately ``mask_time_prob * sequence_length // mask_time_length`` feature"
+                "Probability of each feature vector along the time axis to be chosen as the start of the vector "
+                "span to be masked. Approximately ``mask_time_prob * sequence_length // mask_time_length`` feature "
                 "vectors will be masked along the time axis."
             )
         },
@@ -234,7 +234,7 @@ class DataTrainingArguments:
         metadata={
             "help": (
                 "If :obj:`True`, will use the token generated when running"
-                ":obj:`transformers-cli login` as HTTP bearer authorization for remote files."
+                ":obj:`huggingface-cli login` as HTTP bearer authorization for remote files."
             )
         },
     )
@@ -284,7 +284,7 @@ class DataCollatorCTCWithPadding:
     pad_to_multiple_of_labels: Optional[int] = None
 
     def __call__(self, features: List[Dict[str, Union[List[int], torch.Tensor]]]) -> Dict[str, torch.Tensor]:
-        # split inputs and labels since they have to be of different lenghts and need
+        # split inputs and labels since they have to be of different lengths and need
         # different padding methods
         input_features = []
         label_features = []
@@ -301,13 +301,12 @@ class DataCollatorCTCWithPadding:
             return_tensors="pt",
         )
 
-        with self.processor.as_target_processor():
-            labels_batch = self.processor.pad(
-                label_features,
-                padding=self.padding,
-                pad_to_multiple_of=self.pad_to_multiple_of_labels,
-                return_tensors="pt",
-            )
+        labels_batch = self.processor.pad(
+            labels=label_features,
+            padding=self.padding,
+            pad_to_multiple_of=self.pad_to_multiple_of_labels,
+            return_tensors="pt",
+        )
 
         # replace padding with -100 to ignore loss correctly
         labels = labels_batch["input_ids"].masked_fill(labels_batch.attention_mask.ne(1), -100)
@@ -355,7 +354,7 @@ def main():
 
     # Log on each process the small summary:
     logger.warning(
-        f"Process rank: {training_args.local_rank}, device: {training_args.device}, n_gpu: {training_args.n_gpu}"
+        f"Process rank: {training_args.local_rank}, device: {training_args.device}, n_gpu: {training_args.n_gpu}, "
         f"distributed training: {bool(training_args.local_rank != -1)}, 16-bits training: {training_args.fp16}"
     )
     # Set the verbosity to info of the Transformers logger (on main process only):
@@ -623,7 +622,6 @@ def main():
 
     # Training
     if training_args.do_train:
-
         # use last checkpoint if exist
         if last_checkpoint is not None:
             checkpoint = last_checkpoint
@@ -658,7 +656,7 @@ def main():
     config_name = data_args.dataset_config_name if data_args.dataset_config_name is not None else "na"
     kwargs = {
         "finetuned_from": model_args.model_name_or_path,
-        "tasks": "speech-recognition",
+        "tasks": "automatic-speech-recognition",
         "tags": ["automatic-speech-recognition", data_args.dataset_name],
         "dataset_args": (
             f"Config: {config_name}, Training split: {data_args.train_split_name}, Eval split:"

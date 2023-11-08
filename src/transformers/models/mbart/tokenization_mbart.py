@@ -14,7 +14,6 @@
 # limitations under the License.
 
 import os
-from contextlib import contextmanager
 from shutil import copyfile
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -58,8 +57,8 @@ class MBartTokenizer(PreTrainedTokenizer):
     Adapted from [`RobertaTokenizer`] and [`XLNetTokenizer`]. Based on
     [SentencePiece](https://github.com/google/sentencepiece).
 
-    The tokenization method is `<tokens> <eos> <language code>` for source language documents, and ``<language code>
-    <tokens> <eos>``` for target language documents.
+    The tokenization method is `<tokens> <eos> <language code>` for source language documents, and `<language code>
+    <tokens> <eos>` for target language documents.
 
     Examples:
 
@@ -69,10 +68,7 @@ class MBartTokenizer(PreTrainedTokenizer):
     >>> tokenizer = MBartTokenizer.from_pretrained("facebook/mbart-large-en-ro", src_lang="en_XX", tgt_lang="ro_RO")
     >>> example_english_phrase = " UN Chief Says There Is No Military Solution in Syria"
     >>> expected_translation_romanian = "Şeful ONU declară că nu există o soluţie militară în Siria"
-    >>> inputs = tokenizer(example_english_phrase, return_tensors="pt")
-    >>> with tokenizer.as_target_tokenizer():
-    ...     labels = tokenizer(expected_translation_romanian, return_tensors="pt")
-    >>> inputs["labels"] = labels["input_ids"]
+    >>> inputs = tokenizer(example_english_phrase, text_target=expected_translation_romanian, return_tensors="pt")
     ```"""
 
     vocab_files_names = VOCAB_FILES_NAMES
@@ -98,29 +94,14 @@ class MBartTokenizer(PreTrainedTokenizer):
         tgt_lang=None,
         sp_model_kwargs: Optional[Dict[str, Any]] = None,
         additional_special_tokens=None,
-        **kwargs
+        **kwargs,
     ):
-
         # Mask token behave like a normal word, i.e. include the space before it
-        mask_token = AddedToken(mask_token, lstrip=True, rstrip=False) if isinstance(mask_token, str) else mask_token
+        mask_token = (
+            AddedToken(mask_token, lstrip=True, normalized=False) if isinstance(mask_token, str) else mask_token
+        )
 
         self.sp_model_kwargs = {} if sp_model_kwargs is None else sp_model_kwargs
-
-        super().__init__(
-            bos_token=bos_token,
-            eos_token=eos_token,
-            unk_token=unk_token,
-            sep_token=sep_token,
-            cls_token=cls_token,
-            pad_token=pad_token,
-            mask_token=mask_token,
-            tokenizer_file=None,
-            src_lang=src_lang,
-            tgt_lang=tgt_lang,
-            additional_special_tokens=additional_special_tokens,
-            sp_model_kwargs=self.sp_model_kwargs,
-            **kwargs,
-        )
 
         self.sp_model = spm.SentencePieceProcessor(**self.sp_model_kwargs)
         self.sp_model.Load(str(vocab_file))
@@ -147,13 +128,29 @@ class MBartTokenizer(PreTrainedTokenizer):
 
         self.fairseq_tokens_to_ids.update(self.lang_code_to_id)
         self.fairseq_ids_to_tokens = {v: k for k, v in self.fairseq_tokens_to_ids.items()}
-        self._additional_special_tokens = list(self.lang_code_to_id.keys())
+        _additional_special_tokens = list(self.lang_code_to_id.keys())
 
         if additional_special_tokens is not None:
             # Only add those special tokens if they are not already there.
-            self._additional_special_tokens.extend(
-                [t for t in additional_special_tokens if t not in self._additional_special_tokens]
+            _additional_special_tokens.extend(
+                [t for t in additional_special_tokens if t not in _additional_special_tokens]
             )
+
+        super().__init__(
+            bos_token=bos_token,
+            eos_token=eos_token,
+            unk_token=unk_token,
+            sep_token=sep_token,
+            cls_token=cls_token,
+            pad_token=pad_token,
+            mask_token=mask_token,
+            tokenizer_file=None,
+            src_lang=src_lang,
+            tgt_lang=tgt_lang,
+            additional_special_tokens=_additional_special_tokens,
+            sp_model_kwargs=self.sp_model_kwargs,
+            **kwargs,
+        )
 
         self._src_lang = src_lang if src_lang is not None else "en_XX"
         self.cur_lang_code_id = self.lang_code_to_id[self._src_lang]
@@ -340,15 +337,11 @@ class MBartTokenizer(PreTrainedTokenizer):
         self.tgt_lang = tgt_lang
         return super().prepare_seq2seq_batch(src_texts, tgt_texts, **kwargs)
 
-    @contextmanager
-    def as_target_tokenizer(self):
-        """
-        Temporarily sets the tokenizer for encoding the targets. Useful for tokenizer associated to
-        sequence-to-sequence models that need a slightly different processing for the labels.
-        """
-        self.set_tgt_lang_special_tokens(self.tgt_lang)
-        yield
-        self.set_src_lang_special_tokens(self.src_lang)
+    def _switch_to_input_mode(self):
+        return self.set_src_lang_special_tokens(self.src_lang)
+
+    def _switch_to_target_mode(self):
+        return self.set_tgt_lang_special_tokens(self.tgt_lang)
 
     def set_src_lang_special_tokens(self, src_lang) -> None:
         """Reset the special tokens to the source lang setting. No prefix and suffix=[eos, src_lang_code]."""

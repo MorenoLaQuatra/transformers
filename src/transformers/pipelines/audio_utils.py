@@ -1,3 +1,5 @@
+# Copyright 2023 The HuggingFace Team. All rights reserved.
+import datetime
 import platform
 import subprocess
 from typing import Optional, Tuple, Union
@@ -36,7 +38,11 @@ def ffmpeg_read(bpayload: bytes, sampling_rate: int) -> np.array:
     out_bytes = output_stream[0]
     audio = np.frombuffer(out_bytes, np.float32)
     if audio.shape[0] == 0:
-        raise ValueError("Malformed soundfile")
+        raise ValueError(
+            "Soundfile is either not in the correct format or is malformed. Ensure that the soundfile has "
+            "a valid audio file extension (e.g. wav, flac or mp3) and is not corrupted. If reading from a remote "
+            "URL, ensure that the URL is the full address to **download** the audio file."
+        )
     return audio
 
 
@@ -117,7 +123,7 @@ def ffmpeg_microphone_live(
             The length of the striding to be used. Stride is used to provide context to a model on the (left, right) of
             an audio sample but without using that part to actually make the prediction. Setting this does not change
             the length of the chunk.
-        format_for_conversion: (`str`, defalts to `f32le`)
+        format_for_conversion (`str`, defalts to `f32le`)
             The name of the format of the audio samples to be returned by ffmpeg. The standard is `f32le`, `s16le`
             could also be used.
     Return:
@@ -154,6 +160,8 @@ def ffmpeg_microphone_live(
 
     stride_left = int(round(sampling_rate * stride_length_s[0])) * size_of_sample
     stride_right = int(round(sampling_rate * stride_length_s[1])) * size_of_sample
+    audio_time = datetime.datetime.now()
+    delta = datetime.timedelta(seconds=chunk_s)
     for item in chunk_bytes_iter(microphone, chunk_len, stride=(stride_left, stride_right), stream=True):
         # Put everything back in numpy scale
         item["raw"] = np.frombuffer(item["raw"], dtype=dtype)
@@ -162,6 +170,10 @@ def ffmpeg_microphone_live(
             item["stride"][1] // size_of_sample,
         )
         item["sampling_rate"] = sampling_rate
+        audio_time += delta
+        if datetime.datetime.now() > audio_time + 10 * delta:
+            # We're late !! SKIP
+            continue
         yield item
 
 

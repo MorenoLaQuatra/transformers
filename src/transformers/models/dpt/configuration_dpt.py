@@ -14,8 +14,11 @@
 # limitations under the License.
 """ DPT model configuration"""
 
+import copy
+
 from ...configuration_utils import PretrainedConfig
 from ...utils import logging
+from ..bit import BitConfig
 
 
 logger = logging.get_logger(__name__)
@@ -49,9 +52,9 @@ class DPTConfig(PretrainedConfig):
         hidden_act (`str` or `function`, *optional*, defaults to `"gelu"`):
             The non-linear activation function (function or string) in the encoder and pooler. If string, `"gelu"`,
             `"relu"`, `"selu"` and `"gelu_new"` are supported.
-        hidden_dropout_prob (`float`, *optional*, defaults to 0.1):
+        hidden_dropout_prob (`float`, *optional*, defaults to 0.0):
             The dropout probabilitiy for all fully connected layers in the embeddings, encoder, and pooler.
-        attention_probs_dropout_prob (`float`, *optional*, defaults to 0.1):
+        attention_probs_dropout_prob (`float`, *optional*, defaults to 0.0):
             The dropout ratio for the attention probabilities.
         initializer_range (`float`, *optional*, defaults to 0.02):
             The standard deviation of the truncated_normal_initializer for initializing all weight matrices.
@@ -63,6 +66,8 @@ class DPTConfig(PretrainedConfig):
             The size (resolution) of each patch.
         num_channels (`int`, *optional*, defaults to 3):
             The number of input channels.
+        is_hybrid (`bool`, *optional*, defaults to `False`):
+            Whether to use a hybrid backbone. Useful in the context of loading DPT-Hybrid models.
         qkv_bias (`bool`, *optional*, defaults to `True`):
             Whether to add a bias to the queries, keys and values.
         backbone_out_indices (`List[int]`, *optional*, defaults to `[2, 5, 8, 11]`):
@@ -78,7 +83,7 @@ class DPTConfig(PretrainedConfig):
             representation to the original feature dimension D using a linear layer followed by a GELU non-linearity.
         reassemble_factors (`List[int]`, *optional*, defaults to `[4, 2, 1, 0.5]`):
             The up/downsampling factors of the reassemble layers.
-        neck_hidden_sizes (`List[str]`, *optional*, defaults to [96, 192, 384, 768]):
+        neck_hidden_sizes (`List[str]`, *optional*, defaults to `[96, 192, 384, 768]`):
             The hidden sizes to project to for the feature maps of the backbone.
         fusion_hidden_size (`int`, *optional*, defaults to 256):
             The number of channels before fusion.
@@ -94,6 +99,12 @@ class DPTConfig(PretrainedConfig):
             The index that is ignored by the loss function of the semantic segmentation model.
         semantic_classifier_dropout (`float`, *optional*, defaults to 0.1):
             The dropout ratio for the semantic classification head.
+        backbone_featmap_shape (`List[int]`, *optional*, defaults to `[1, 1024, 24, 24]`):
+            Used only for the `hybrid` embedding type. The shape of the feature maps of the backbone.
+        neck_ignore_stages (`List[int]`, *optional*, defaults to `[0, 1]`):
+            Used only for the `hybrid` embedding type. The stages of the readout layers to ignore.
+        backbone_config (`Union[Dict[str, Any], PretrainedConfig]`, *optional*):
+            Used only for the `hybrid` embedding type. The configuration of the backbone in a dictionary.
 
     Example:
 
@@ -125,6 +136,7 @@ class DPTConfig(PretrainedConfig):
         image_size=384,
         patch_size=16,
         num_channels=3,
+        is_hybrid=False,
         qkv_bias=True,
         backbone_out_indices=[2, 5, 8, 11],
         readout_type="project",
@@ -137,11 +149,47 @@ class DPTConfig(PretrainedConfig):
         auxiliary_loss_weight=0.4,
         semantic_loss_ignore_index=255,
         semantic_classifier_dropout=0.1,
-        **kwargs
+        backbone_featmap_shape=[1, 1024, 24, 24],
+        neck_ignore_stages=[0, 1],
+        backbone_config=None,
+        **kwargs,
     ):
         super().__init__(**kwargs)
 
         self.hidden_size = hidden_size
+        self.is_hybrid = is_hybrid
+
+        if self.is_hybrid:
+            if backbone_config is None:
+                logger.info("Initializing the config with a `BiT` backbone.")
+                backbone_config = {
+                    "global_padding": "same",
+                    "layer_type": "bottleneck",
+                    "depths": [3, 4, 9],
+                    "out_features": ["stage1", "stage2", "stage3"],
+                    "embedding_dynamic_padding": True,
+                }
+                self.backbone_config = BitConfig(**backbone_config)
+            elif isinstance(backbone_config, dict):
+                logger.info("Initializing the config with a `BiT` backbone.")
+                self.backbone_config = BitConfig(**backbone_config)
+            elif isinstance(backbone_config, PretrainedConfig):
+                self.backbone_config = backbone_config
+            else:
+                raise ValueError(
+                    f"backbone_config must be a dictionary or a `PretrainedConfig`, got {backbone_config.__class__}."
+                )
+
+            self.backbone_featmap_shape = backbone_featmap_shape
+            self.neck_ignore_stages = neck_ignore_stages
+
+            if readout_type != "project":
+                raise ValueError("Readout type must be 'project' when using `DPT-hybrid` mode.")
+        else:
+            self.backbone_config = None
+            self.backbone_featmap_shape = None
+            self.neck_ignore_stages = []
+
         self.num_hidden_layers = num_hidden_layers
         self.num_attention_heads = num_attention_heads
         self.intermediate_size = intermediate_size
@@ -168,3 +216,16 @@ class DPTConfig(PretrainedConfig):
         self.auxiliary_loss_weight = auxiliary_loss_weight
         self.semantic_loss_ignore_index = semantic_loss_ignore_index
         self.semantic_classifier_dropout = semantic_classifier_dropout
+
+    def to_dict(self):
+        """
+        Serializes this instance to a Python dictionary. Override the default [`~PretrainedConfig.to_dict`]. Returns:
+            `Dict[str, any]`: Dictionary of all the attributes that make up this configuration instance,
+        """
+        output = copy.deepcopy(self.__dict__)
+
+        if output["backbone_config"] is not None:
+            output["backbone_config"] = self.backbone_config.to_dict()
+
+        output["model_type"] = self.__class__.model_type
+        return output

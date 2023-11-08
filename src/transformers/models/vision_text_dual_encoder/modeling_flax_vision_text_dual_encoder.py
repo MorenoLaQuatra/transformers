@@ -52,9 +52,10 @@ VISION_TEXT_DUAL_ENCODER_START_DOCSTRING = r"""
     library implements for all its model (such as downloading or saving, resizing the input embeddings, pruning heads
     etc.)
 
-     This model is also a Flax Linen [flax.linen.Module](https://flax.readthedocs.io/en/latest/flax.linen.html#module)
-     subclass. Use it as a regular Flax linen Module and refer to the Flax documentation for all matter related to
-     general usage and behavior.
+     This model is also a
+     [flax.linen.Module](https://flax.readthedocs.io/en/latest/api_reference/flax.linen/module.html) subclass. Use it
+     as a regular Flax linen Module and refer to the Flax documentation for all matter related to general usage and
+     behavior.
 
     Finally, this model supports inherent JAX features such as:
 
@@ -88,7 +89,7 @@ VISION_TEXT_DUAL_ENCODER_INPUTS_DOCSTRING = r"""
             Indices of input sequence tokens in the vocabulary. Padding will be ignored by default should you provide
             it.
 
-            Indices can be obtained using [`PreTrainedTokenizer`]. See [`PreTrainedTokenizer.encode`] and
+            Indices can be obtained using [`AutoTokenizer`]. See [`PreTrainedTokenizer.encode`] and
             [`PreTrainedTokenizer.__call__`] for details.
 
             [What are input IDs?](../glossary#input-ids)
@@ -106,8 +107,8 @@ VISION_TEXT_DUAL_ENCODER_INPUTS_DOCSTRING = r"""
             [What are position IDs?](../glossary#position-ids)
         pixel_values (`torch.FloatTensor` of shape `(batch_size, num_channels, height, width)`):
             Pixel values. Padding will be ignored by default should you provide it. Pixel values can be obtained using
-            a feature extractor (e.g. if you use ViT as the encoder, you should use [`ViTFeatureExtractor`]). See
-            [`ViTFeatureExtractor.__call__`] for details.
+            an image processor (e.g. if you use ViT as the encoder, you should use [`AutoImageProcessor`]). See
+            [`ViTImageProcessor.__call__`] for details.
         output_attentions (`bool`, *optional*):
             Whether or not to return the attentions tensors of all attention layers. See `attentions` under returned
             tensors for more detail.
@@ -227,9 +228,8 @@ class FlaxVisionTextDualEncoderModel(FlaxPreTrainedModel):
         seed: int = 0,
         dtype: jnp.dtype = jnp.float32,
         _do_init: bool = True,
-        **kwargs
+        **kwargs,
     ):
-
         if not _do_init:
             raise ValueError(
                 "`FlaxVisionTextDualEncoderModel` cannot be created without initializing, `_do_init` must be `True`."
@@ -556,13 +556,13 @@ VISION_TEXT_DUAL_ENCODER_MODEL_DOCSTRING = r"""
     >>> from transformers import (
     ...     FlaxVisionTextDualEncoderModel,
     ...     VisionTextDualEncoderProcessor,
-    ...     ViTFeatureExtractor,
-    ...     BertTokenizer,
+    ...     AutoImageProcessor,
+    ...     AutoTokenizer,
     ... )
 
-    >>> tokenizer = BertTokenizer.from_pretrained("bert-base-uncased")
-    >>> feature_extractor = ViTFeatureExtractor.from_pretrained("google/vit-base-patch16-224")
-    >>> processor = VisionTextDualEncoderProcessor(feature_extractor, tokenizer)
+    >>> tokenizer = AutoTokenizer.from_pretrained("bert-base-uncased")
+    >>> image_processor = AutoImageProcesor.from_pretrained("google/vit-base-patch16-224")
+    >>> processor = VisionTextDualEncoderProcessor(image_processor, tokenizer)
     >>> model = FlaxVisionTextDualEncoderModel.from_vision_text_pretrained(
     ...     "google/vit-base-patch16-224", "bert-base-uncased"
     ... )

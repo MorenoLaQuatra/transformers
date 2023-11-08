@@ -13,8 +13,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """ mT5 model configuration"""
+from typing import Mapping
 
 from ...configuration_utils import PretrainedConfig
+from ...onnx import OnnxSeq2SeqConfigWithPast
 from ...utils import logging
 
 
@@ -54,6 +56,8 @@ class MT5Config(PretrainedConfig):
             The maximum distance of the longer sequences for the bucket separation.
         dropout_rate (`float`, *optional*, defaults to 0.1):
             The ratio for all dropout layers.
+        classifier_dropout (`float`, *optional*, defaults to 0.0):
+            The dropout ratio for classifier.
         layer_norm_eps (`float`, *optional*, defaults to 1e-6):
             The epsilon used by the layer normalization layers.
         initializer_factor (`float`, *optional*, defaults to 1):
@@ -89,7 +93,8 @@ class MT5Config(PretrainedConfig):
         pad_token_id=0,
         eos_token_id=1,
         decoder_start_token_id=0,
-        **kwargs
+        classifier_dropout=0.0,
+        **kwargs,
     ):
         super().__init__(
             is_encoder_decoder=is_encoder_decoder,
@@ -112,10 +117,26 @@ class MT5Config(PretrainedConfig):
         self.relative_attention_num_buckets = relative_attention_num_buckets
         self.relative_attention_max_distance = relative_attention_max_distance
         self.dropout_rate = dropout_rate
+        self.classifier_dropout = classifier_dropout
         self.layer_norm_epsilon = layer_norm_epsilon
         self.initializer_factor = initializer_factor
         self.feed_forward_proj = feed_forward_proj
         self.use_cache = use_cache
+
+        act_info = self.feed_forward_proj.split("-")
+        self.dense_act_fn = act_info[-1]
+        self.is_gated_act = act_info[0] == "gated"
+
+        if len(act_info) > 1 and act_info[0] != "gated" or len(act_info) > 2:
+            raise ValueError(
+                f"`feed_forward_proj`: {feed_forward_proj} is not a valid activation function of the dense layer. "
+                "Please make sure `feed_forward_proj` is of the format `gated-{ACT_FN}` or `{ACT_FN}`, e.g. "
+                "'gated-gelu' or 'relu'"
+            )
+
+        # for backwards compatibility
+        if feed_forward_proj == "gated-gelu":
+            self.dense_act_fn = "gelu_new"
 
     @property
     def hidden_size(self):
@@ -128,3 +149,34 @@ class MT5Config(PretrainedConfig):
     @property
     def num_hidden_layers(self):
         return self.num_layers
+
+
+class MT5OnnxConfig(OnnxSeq2SeqConfigWithPast):
+    @property
+    # Copied from transformers.models.t5.configuration_t5.T5OnnxConfig.inputs
+    def inputs(self) -> Mapping[str, Mapping[int, str]]:
+        common_inputs = {
+            "input_ids": {0: "batch", 1: "encoder_sequence"},
+            "attention_mask": {0: "batch", 1: "encoder_sequence"},
+        }
+        if self.use_past:
+            common_inputs["attention_mask"][1] = "past_encoder_sequence + sequence"
+            common_inputs["decoder_input_ids"] = {0: "batch"}
+            common_inputs["decoder_attention_mask"] = {0: "batch", 1: "past_decoder_sequence + sequence"}
+        else:
+            common_inputs["decoder_input_ids"] = {0: "batch", 1: "decoder_sequence"}
+            common_inputs["decoder_attention_mask"] = {0: "batch", 1: "decoder_sequence"}
+
+        if self.use_past:
+            self.fill_with_past_key_values_(common_inputs, direction="inputs")
+
+        return common_inputs
+
+    @property
+    # Copied from transformers.models.t5.configuration_t5.T5OnnxConfig.default_onnx_opset
+    def default_onnx_opset(self) -> int:
+        return 13
+
+    @property
+    def atol_for_validation(self) -> float:
+        return 5e-4

@@ -41,7 +41,6 @@ logger = logging.get_logger(__name__)
 
 _CHECKPOINT_FOR_DOC = "transfo-xl-wt103"
 _CONFIG_FOR_DOC = "TransfoXLConfig"
-_TOKENIZER_FOR_DOC = "TransfoXLTokenizer"
 
 TRANSFO_XL_PRETRAINED_MODEL_ARCHIVE_LIST = [
     "transfo-xl-wt103",
@@ -186,7 +185,7 @@ class PositionalEmbedding(nn.Module):
         self.register_buffer("inv_freq", inv_freq)
 
     def forward(self, pos_seq, bsz=None):
-        sinusoid_inp = torch.ger(pos_seq, self.inv_freq)
+        sinusoid_inp = torch.outer(pos_seq, self.inv_freq)
         pos_emb = torch.cat([sinusoid_inp.sin(), sinusoid_inp.cos()], dim=-1)
 
         if bsz is not None:
@@ -327,21 +326,17 @@ class RelPartialLearnableMultiHeadAttn(nn.Module):
         attn_score = AC + BD
         attn_score.mul_(self.scale)
 
+        mask_value = torch.finfo(attn_score.dtype).min
+
         # compute attention probability
         if attn_mask is not None and torch.sum(attn_mask).item():
             attn_mask = attn_mask == 1  # Switch to bool
             if attn_mask.dim() == 2:
-                if next(self.parameters()).dtype == torch.float16:
-                    attn_score = (
-                        attn_score.float().masked_fill(attn_mask[None, :, :, None], -65000).type_as(attn_score)
-                    )
-                else:
-                    attn_score = attn_score.float().masked_fill(attn_mask[None, :, :, None], -1e30).type_as(attn_score)
+                attn_score = (
+                    attn_score.float().masked_fill(attn_mask[None, :, :, None], mask_value).type_as(attn_score)
+                )
             elif attn_mask.dim() == 3:
-                if next(self.parameters()).dtype == torch.float16:
-                    attn_score = attn_score.float().masked_fill(attn_mask[:, :, :, None], -65000).type_as(attn_score)
-                else:
-                    attn_score = attn_score.float().masked_fill(attn_mask[:, :, :, None], -1e30).type_as(attn_score)
+                attn_score = attn_score.float().masked_fill(attn_mask[:, :, :, None], mask_value).type_as(attn_score)
 
         # [qlen x klen x bsz x n_head]
         attn_prob = nn.functional.softmax(attn_score, dim=1)
@@ -386,7 +381,6 @@ class RelPartialLearnableDecoderLayer(nn.Module):
         )
 
     def forward(self, dec_inp, r, dec_attn_mask=None, mems=None, head_mask=None, output_attentions=False):
-
         attn_outputs = self.dec_attn(
             dec_inp,
             r,
@@ -527,7 +521,6 @@ class TransfoXLPreTrainedModel(PreTrainedModel):
         weights embeddings afterwards if the model class has a *tie_weights()* method.
 
         Arguments:
-
             new_num_tokens: (*optional*) int:
                 New number of tokens in the embedding matrix. Increasing the size will add newly initialized vectors at
                 the end. Reducing the size will remove vectors from the end. If not provided or None: does nothing and
@@ -735,7 +728,7 @@ TRANSFO_XL_INPUTS_DOCSTRING = r"""
         input_ids (`torch.LongTensor` of shape `(batch_size, sequence_length)`):
             Indices of input sequence tokens in the vocabulary.
 
-            Indices can be obtained using [`TransfoXLTokenizer`]. See [`PreTrainedTokenizer.encode`] and
+            Indices can be obtained using [`AutoTokenizer`]. See [`PreTrainedTokenizer.encode`] and
             [`PreTrainedTokenizer.__call__`] for details.
 
             [What are input IDs?](../glossary#input-ids)
@@ -866,7 +859,6 @@ class TransfoXLModel(TransfoXLPreTrainedModel):
             end_idx = mlen + max(0, qlen)
             beg_idx = max(0, end_idx - self.mem_len)
             for i in range(len(hids)):
-
                 cat = torch.cat([mems[i], hids[i]], dim=0)
                 new_mems.append(cat[beg_idx:end_idx].detach())
 
@@ -874,7 +866,6 @@ class TransfoXLModel(TransfoXLPreTrainedModel):
 
     @add_start_docstrings_to_model_forward(TRANSFO_XL_INPUTS_DOCSTRING)
     @add_code_sample_docstrings(
-        processor_class=_TOKENIZER_FOR_DOC,
         checkpoint=_CHECKPOINT_FOR_DOC,
         output_type=TransfoXLModelOutput,
         config_class=_CONFIG_FOR_DOC,
@@ -936,7 +927,7 @@ class TransfoXLModel(TransfoXLPreTrainedModel):
         mlen = mems[0].size(0) if mems is not None else 0
         klen = mlen + qlen
         if self.same_length:
-            all_ones = word_emb.new_ones((qlen, klen), dtype=torch.uint8)
+            all_ones = word_emb.new_ones((qlen, klen), dtype=torch.bool)
             mask_len = klen - self.mem_len
             if mask_len > 0:
                 mask_shift_len = qlen - mask_len
@@ -944,7 +935,7 @@ class TransfoXLModel(TransfoXLPreTrainedModel):
                 mask_shift_len = qlen
             dec_attn_mask = (torch.triu(all_ones, 1 + mlen) + torch.tril(all_ones, -mask_shift_len))[:, :, None]  # -1
         else:
-            dec_attn_mask = torch.triu(word_emb.new_ones((qlen, klen), dtype=torch.uint8), diagonal=1 + mlen)[
+            dec_attn_mask = torch.triu(word_emb.new_ones((qlen, klen), dtype=torch.bool), diagonal=1 + mlen)[
                 :, :, None
             ]
 
@@ -1011,6 +1002,8 @@ class TransfoXLModel(TransfoXLPreTrainedModel):
     TRANSFO_XL_START_DOCSTRING,
 )
 class TransfoXLLMHeadModel(TransfoXLPreTrainedModel):
+    _tied_weights_keys = [r"crit\.out_projs\.\d+", r"crit\.out_layers\.\d+\.weight"]
+
     def __init__(self, config):
         super().__init__(config)
         self.transformer = TransfoXLModel(config)
@@ -1019,7 +1012,7 @@ class TransfoXLLMHeadModel(TransfoXLPreTrainedModel):
 
         if not self.trainer_compatible:
             warnings.warn(
-                "The output of TransfoXL will be updated in v5 to support a single loss as first argument. In order"
+                "The output of TransfoXL will be updated in v5 to support a single loss as first argument. In order "
                 "to use that updated output, please specify `trainer_compatible=True` as your configuration"
                 " attribute.",
                 DeprecationWarning,
@@ -1066,7 +1059,6 @@ class TransfoXLLMHeadModel(TransfoXLPreTrainedModel):
 
     @add_start_docstrings_to_model_forward(TRANSFO_XL_INPUTS_DOCSTRING)
     @add_code_sample_docstrings(
-        processor_class=_TOKENIZER_FOR_DOC,
         checkpoint=_CHECKPOINT_FOR_DOC,
         output_type=TransfoXLLMHeadModelOutput,
         config_class=_CONFIG_FOR_DOC,
@@ -1153,12 +1145,12 @@ class TransfoXLLMHeadModel(TransfoXLPreTrainedModel):
         else:
             return self.crit.out_layers[-1]
 
-    def prepare_inputs_for_generation(self, input_ids, past=None, **model_kwargs):
+    def prepare_inputs_for_generation(self, input_ids, past_key_values=None, **model_kwargs):
         inputs = {}
 
         # if past is defined in model kwargs then use it for faster decoding
-        if past:
-            inputs["mems"] = past
+        if past_key_values:
+            inputs["mems"] = past_key_values
             inputs["input_ids"] = input_ids[:, -1].unsqueeze(-1)
         else:
             inputs["input_ids"] = input_ids
@@ -1198,8 +1190,6 @@ class TransfoXLLMHeadModel(TransfoXLPreTrainedModel):
     TRANSFO_XL_START_DOCSTRING,
 )
 class TransfoXLForSequenceClassification(TransfoXLPreTrainedModel):
-    _keys_to_ignore_on_load_missing = [r"h\.\d+\.attn\.masked_bias", r"lm_head\.weight"]
-
     def __init__(self, config):
         super().__init__(config)
         self.num_labels = config.num_labels
@@ -1210,7 +1200,6 @@ class TransfoXLForSequenceClassification(TransfoXLPreTrainedModel):
 
     @add_start_docstrings_to_model_forward(TRANSFO_XL_INPUTS_DOCSTRING)
     @add_code_sample_docstrings(
-        processor_class=_TOKENIZER_FOR_DOC,
         checkpoint=_CHECKPOINT_FOR_DOC,
         output_type=TransfoXLSequenceClassifierOutputWithPast,
         config_class=_CONFIG_FOR_DOC,
@@ -1258,7 +1247,9 @@ class TransfoXLForSequenceClassification(TransfoXLPreTrainedModel):
             sequence_lengths = -1
         else:
             if input_ids is not None:
-                sequence_lengths = torch.ne(input_ids, self.config.pad_token_id).sum(-1) - 1
+                sequence_lengths = (torch.eq(input_ids, self.config.pad_token_id).long().argmax(-1) - 1).to(
+                    logits.device
+                )
             else:
                 sequence_lengths = -1
                 logger.warning(

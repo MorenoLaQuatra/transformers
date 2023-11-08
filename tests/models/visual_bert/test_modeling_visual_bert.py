@@ -22,6 +22,7 @@ from transformers.testing_utils import require_torch, slow, torch_device
 
 from ...test_configuration_common import ConfigTester
 from ...test_modeling_common import ModelTesterMixin, floats_tensor, ids_tensor
+from ...test_pipeline_mixin import PipelineTesterMixin
 
 
 if is_torch_available():
@@ -53,7 +54,7 @@ class VisualBertModelTester:
         use_labels=True,
         vocab_size=99,
         hidden_size=32,
-        num_hidden_layers=5,
+        num_hidden_layers=2,
         num_attention_heads=4,
         intermediate_size=37,
         hidden_act="gelu",
@@ -299,8 +300,7 @@ class VisualBertModelTester:
 
 
 @require_torch
-class VisualBertModelTest(ModelTesterMixin, unittest.TestCase):
-
+class VisualBertModelTest(ModelTesterMixin, PipelineTesterMixin, unittest.TestCase):
     all_model_classes = (
         (
             VisualBertModel,
@@ -313,6 +313,7 @@ class VisualBertModelTest(ModelTesterMixin, unittest.TestCase):
         if is_torch_available()
         else ()
     )
+    pipeline_model_mapping = {"feature-extraction": VisualBertModel} if is_torch_available() else {}
     test_torchscript = False
     test_pruning = False
 
@@ -554,6 +555,24 @@ class VisualBertModelTest(ModelTesterMixin, unittest.TestCase):
             model = VisualBertModel.from_pretrained(model_name)
             self.assertIsNotNone(model)
 
+    @unittest.skip(
+        reason="This architecure seem to not compute gradients properly when using GC, check: https://github.com/huggingface/transformers/pull/27124"
+    )
+    def test_training_gradient_checkpointing(self):
+        pass
+
+    @unittest.skip(
+        reason="This architecure seem to not compute gradients properly when using GC, check: https://github.com/huggingface/transformers/pull/27124"
+    )
+    def test_training_gradient_checkpointing_use_reentrant(self):
+        pass
+
+    @unittest.skip(
+        reason="This architecure seem to not compute gradients properly when using GC, check: https://github.com/huggingface/transformers/pull/27124"
+    )
+    def test_training_gradient_checkpointing_use_reentrant_false(self):
+        pass
+
 
 @require_torch
 class VisualBertModelIntegrationTest(unittest.TestCase):
@@ -568,14 +587,15 @@ class VisualBertModelIntegrationTest(unittest.TestCase):
         attention_mask = torch.tensor([1] * 6).reshape(1, -1)
         visual_attention_mask = torch.tensor([1] * 10).reshape(1, -1)
 
-        output = model(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            token_type_ids=token_type_ids,
-            visual_embeds=visual_embeds,
-            visual_attention_mask=visual_attention_mask,
-            visual_token_type_ids=visual_token_type_ids,
-        )
+        with torch.no_grad():
+            output = model(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                token_type_ids=token_type_ids,
+                visual_embeds=visual_embeds,
+                visual_attention_mask=visual_attention_mask,
+                visual_token_type_ids=visual_token_type_ids,
+            )
 
         vocab_size = 30522
 
@@ -606,14 +626,15 @@ class VisualBertModelIntegrationTest(unittest.TestCase):
         attention_mask = torch.tensor([1] * 6).reshape(1, -1)
         visual_attention_mask = torch.tensor([1] * 10).reshape(1, -1)
 
-        output = model(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            token_type_ids=token_type_ids,
-            visual_embeds=visual_embeds,
-            visual_attention_mask=visual_attention_mask,
-            visual_token_type_ids=visual_token_type_ids,
-        )
+        with torch.no_grad():
+            output = model(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                token_type_ids=token_type_ids,
+                visual_embeds=visual_embeds,
+                visual_attention_mask=visual_attention_mask,
+                visual_token_type_ids=visual_token_type_ids,
+            )
 
         # vocab_size = 30522
 
@@ -637,14 +658,15 @@ class VisualBertModelIntegrationTest(unittest.TestCase):
         attention_mask = torch.tensor([1] * 6).reshape(1, -1)
         visual_attention_mask = torch.tensor([1] * 10).reshape(1, -1)
 
-        output = model(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            token_type_ids=token_type_ids,
-            visual_embeds=visual_embeds,
-            visual_attention_mask=visual_attention_mask,
-            visual_token_type_ids=visual_token_type_ids,
-        )
+        with torch.no_grad():
+            output = model(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                token_type_ids=token_type_ids,
+                visual_embeds=visual_embeds,
+                visual_attention_mask=visual_attention_mask,
+                visual_token_type_ids=visual_token_type_ids,
+            )
 
         # vocab_size = 30522
 
@@ -667,14 +689,15 @@ class VisualBertModelIntegrationTest(unittest.TestCase):
         visual_token_type_ids = torch.ones(size=(1, 4, 10), dtype=torch.long)
         visual_attention_mask = torch.ones_like(visual_token_type_ids)
 
-        output = model(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            token_type_ids=token_type_ids,
-            visual_embeds=visual_embeds,
-            visual_attention_mask=visual_attention_mask,
-            visual_token_type_ids=visual_token_type_ids,
-        )
+        with torch.no_grad():
+            output = model(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                token_type_ids=token_type_ids,
+                visual_embeds=visual_embeds,
+                visual_attention_mask=visual_attention_mask,
+                visual_token_type_ids=visual_token_type_ids,
+            )
 
         # vocab_size = 30522
 

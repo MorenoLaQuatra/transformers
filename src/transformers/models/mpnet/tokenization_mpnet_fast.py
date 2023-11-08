@@ -98,7 +98,7 @@ class MPNetTokenizerFast(PreTrainedTokenizerFast):
         tokenize_chinese_chars (`bool`, *optional*, defaults to `True`):
             Whether or not to tokenize Chinese characters. This should likely be deactivated for Japanese (see [this
             issue](https://github.com/huggingface/transformers/issues/328)).
-        strip_accents: (`bool`, *optional*):
+        strip_accents (`bool`, *optional*):
             Whether or not to strip all accents. If this option is not specified, then it will be determined by the
             value for `lowercase` (as in the original BERT).
     """
@@ -124,8 +124,18 @@ class MPNetTokenizerFast(PreTrainedTokenizerFast):
         mask_token="<mask>",
         tokenize_chinese_chars=True,
         strip_accents=None,
-        **kwargs
+        **kwargs,
     ):
+        bos_token = AddedToken(bos_token, lstrip=False, rstrip=False) if isinstance(bos_token, str) else bos_token
+        eos_token = AddedToken(eos_token, lstrip=False, rstrip=False) if isinstance(eos_token, str) else eos_token
+        sep_token = AddedToken(sep_token, lstrip=False, rstrip=False) if isinstance(sep_token, str) else sep_token
+        cls_token = AddedToken(cls_token, lstrip=False, rstrip=False) if isinstance(cls_token, str) else cls_token
+        unk_token = AddedToken(unk_token, lstrip=False, rstrip=False) if isinstance(unk_token, str) else unk_token
+        pad_token = AddedToken(pad_token, lstrip=False, rstrip=False) if isinstance(pad_token, str) else pad_token
+
+        # Mask token behave like a normal word, i.e. include the space before it
+        mask_token = AddedToken(mask_token, lstrip=True, rstrip=False) if isinstance(mask_token, str) else mask_token
+
         super().__init__(
             vocab_file,
             tokenizer_file=tokenizer_file,
@@ -163,8 +173,9 @@ class MPNetTokenizerFast(PreTrainedTokenizerFast):
         MPNet tokenizer has a special mask token to be usable in the fill-mask pipeline. The mask token will greedily
         comprise the space before the *<mask>*.
         """
-        if self._mask_token is None and self.verbose:
-            logger.error("Using mask_token, but it is not set yet.")
+        if self._mask_token is None:
+            if self.verbose:
+                logger.error("Using mask_token, but it is not set yet.")
             return None
         return str(self._mask_token)
 

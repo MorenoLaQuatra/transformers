@@ -22,9 +22,14 @@ import random
 from pathlib import Path
 
 import datasets
+import evaluate
 import numpy as np
 import torch
-from datasets import load_dataset, load_metric
+from accelerate import Accelerator
+from accelerate.logging import get_logger
+from accelerate.utils import set_seed
+from datasets import load_dataset
+from huggingface_hub import Repository, create_repo, hf_hub_download
 from PIL import Image
 from torch.utils.data import DataLoader
 from torchvision import transforms
@@ -32,21 +37,20 @@ from torchvision.transforms import functional
 from tqdm.auto import tqdm
 
 import transformers
-from accelerate import Accelerator
-from accelerate.logging import get_logger
-from accelerate.utils import set_seed
-from huggingface_hub import Repository, hf_hub_download
 from transformers import (
     AutoConfig,
-    AutoFeatureExtractor,
+    AutoImageProcessor,
     AutoModelForSemanticSegmentation,
     SchedulerType,
     default_data_collator,
     get_scheduler,
 )
-from transformers.utils import get_full_repo_name
+from transformers.utils import check_min_version, send_example_telemetry
 from transformers.utils.versions import require_version
 
+
+# Will error if the minimal version of Transformers is not installed. Remove at your own risks.
+check_min_version("4.36.0.dev0")
 
 logger = get_logger(__name__)
 
@@ -270,6 +274,16 @@ def parse_args():
     )
     parser.add_argument("--hub_token", type=str, help="The token to use to push to the Model Hub.")
     parser.add_argument(
+        "--trust_remote_code",
+        type=bool,
+        default=False,
+        help=(
+            "Whether or not to allow for custom models defined on the Hub in their own modeling files. This option"
+            "should only be set to `True` for repositories you trust and in which you have read the code, as it will "
+            "execute code present on the Hub on your local machine."
+        ),
+    )
+    parser.add_argument(
         "--checkpointing_steps",
         type=str,
         default=None,
@@ -293,7 +307,7 @@ def parse_args():
         default="all",
         help=(
             'The integration to report the results and logs to. Supported platforms are `"tensorboard"`,'
-            ' `"wandb"` and `"comet_ml"`. Use `"all"` (default) to report to all integrations.'
+            ' `"wandb"`, `"comet_ml"` and `"clearml"`. Use `"all"` (default) to report to all integrations. '
             "Only applicable when `--with_tracking` is passed."
         ),
     )
@@ -315,12 +329,21 @@ def parse_args():
 def main():
     args = parse_args()
 
+    # Sending telemetry. Tracking the example usage helps us better allocate resources to maintain them. The
+    # information sent is the one passed as arguments along with your Python/PyTorch versions.
+    send_example_telemetry("run_semantic_segmentation_no_trainer", args)
+
     # Initialize the accelerator. We will let the accelerator handle device placement for us in this example.
     # If we're using tracking, we also need to initialize it here and it will by default pick up all supported trackers
     # in the environment
-    accelerator = (
-        Accelerator(log_with=args.report_to, logging_dir=args.output_dir) if args.with_tracking else Accelerator()
-    )
+    accelerator_log_kwargs = {}
+
+    if args.with_tracking:
+        accelerator_log_kwargs["log_with"] = args.report_to
+        accelerator_log_kwargs["project_dir"] = args.output_dir
+
+    accelerator = Accelerator(gradient_accumulation_steps=args.gradient_accumulation_steps, **accelerator_log_kwargs)
+
     logger.info(accelerator.state, main_process_only=False)
     if accelerator.is_local_main_process:
         datasets.utils.logging.set_verbosity_warning()
@@ -337,11 +360,14 @@ def main():
     # Handle the repository creation
     if accelerator.is_main_process:
         if args.push_to_hub:
-            if args.hub_model_id is None:
-                repo_name = get_full_repo_name(Path(args.output_dir).name, token=args.hub_token)
-            else:
-                repo_name = args.hub_model_id
-            repo = Repository(args.output_dir, clone_from=repo_name)
+            # Retrieve of infer repo_name
+            repo_name = args.hub_model_id
+            if repo_name is None:
+                repo_name = Path(args.output_dir).absolute().name
+            # Create repo and retrieve repo_id
+            repo_id = create_repo(repo_name, exist_ok=True, token=args.hub_token).repo_id
+            # Clone repo locally
+            repo = Repository(args.output_dir, clone_from=repo_id, token=args.hub_token)
 
             with open(os.path.join(args.output_dir, ".gitignore"), "w+") as gitignore:
                 if "step_*" not in gitignore:
@@ -374,32 +400,43 @@ def main():
     # Prepare label mappings.
     # We'll include these in the model's config to get human readable labels in the Inference API.
     if args.dataset_name == "scene_parse_150":
-        repo_id = "datasets/huggingface/label-files"
+        repo_id = "huggingface/label-files"
         filename = "ade20k-id2label.json"
     else:
-        repo_id = f"datasets/{args.dataset_name}"
+        repo_id = args.dataset_name
         filename = "id2label.json"
-    id2label = json.load(open(hf_hub_download(repo_id, filename), "r"))
+    id2label = json.load(open(hf_hub_download(repo_id, filename, repo_type="dataset"), "r"))
     id2label = {int(k): v for k, v in id2label.items()}
     label2id = {v: k for k, v in id2label.items()}
 
-    # Load pretrained model and feature extractor
-    config = AutoConfig.from_pretrained(args.model_name_or_path, id2label=id2label, label2id=label2id)
-    feature_extractor = AutoFeatureExtractor.from_pretrained(args.model_name_or_path)
-    model = AutoModelForSemanticSegmentation.from_pretrained(args.model_name_or_path, config=config)
+    # Load pretrained model and image processor
+    config = AutoConfig.from_pretrained(
+        args.model_name_or_path, id2label=id2label, label2id=label2id, trust_remote_code=args.trust_remote_code
+    )
+    image_processor = AutoImageProcessor.from_pretrained(
+        args.model_name_or_path, trust_remote_code=args.trust_remote_code
+    )
+    model = AutoModelForSemanticSegmentation.from_pretrained(
+        args.model_name_or_path, config=config, trust_remote_code=args.trust_remote_code
+    )
 
     # Preprocessing the datasets
     # Define torchvision transforms to be applied to each image + target.
     # Not that straightforward in torchvision: https://github.com/pytorch/vision/issues/9
     # Currently based on official torchvision references: https://github.com/pytorch/vision/blob/main/references/segmentation/transforms.py
+    if "shortest_edge" in image_processor.size:
+        # We instead set the target size as (shortest_edge, shortest_edge) to here to ensure all images are batchable.
+        size = (image_processor.size["shortest_edge"], image_processor.size["shortest_edge"])
+    else:
+        size = (image_processor.size["height"], image_processor.size["width"])
     train_transforms = Compose(
         [
             ReduceLabels() if args.reduce_labels else Identity(),
-            RandomCrop(size=feature_extractor.size),
+            RandomCrop(size=size),
             RandomHorizontalFlip(flip_prob=0.5),
             PILToTensor(),
             ConvertImageDtype(torch.float),
-            Normalize(mean=feature_extractor.image_mean, std=feature_extractor.image_std),
+            Normalize(mean=image_processor.image_mean, std=image_processor.image_std),
         ]
     )
     # Define torchvision transform to be applied to each image.
@@ -407,10 +444,10 @@ def main():
     val_transforms = Compose(
         [
             ReduceLabels() if args.reduce_labels else Identity(),
-            Resize(size=(feature_extractor.size, feature_extractor.size)),
+            Resize(size=size),
             PILToTensor(),
             ConvertImageDtype(torch.float),
-            Normalize(mean=feature_extractor.image_mean, std=feature_extractor.image_std),
+            Normalize(mean=image_processor.image_mean, std=image_processor.image_std),
         ]
     )
 
@@ -422,7 +459,7 @@ def main():
             pixel_values.append(image)
             labels.append(target)
 
-        encoding = dict()
+        encoding = {}
         encoding["pixel_values"] = torch.stack(pixel_values)
         encoding["labels"] = torch.stack(labels)
 
@@ -436,7 +473,7 @@ def main():
             pixel_values.append(image)
             labels.append(target)
 
-        encoding = dict()
+        encoding = {}
         encoding["pixel_values"] = torch.stack(pixel_values)
         encoding["labels"] = torch.stack(labels)
 
@@ -462,25 +499,22 @@ def main():
     )
 
     # Figure out how many steps we should save the Accelerator states
-    if hasattr(args.checkpointing_steps, "isdigit"):
-        checkpointing_steps = args.checkpointing_steps
-        if args.checkpointing_steps.isdigit():
-            checkpointing_steps = int(args.checkpointing_steps)
-    else:
-        checkpointing_steps = None
+    checkpointing_steps = args.checkpointing_steps
+    if checkpointing_steps is not None and checkpointing_steps.isdigit():
+        checkpointing_steps = int(checkpointing_steps)
 
     # Scheduler and math around the number of training steps.
+    overrode_max_train_steps = False
     num_update_steps_per_epoch = math.ceil(len(train_dataloader) / args.gradient_accumulation_steps)
     if args.max_train_steps is None:
         args.max_train_steps = args.num_train_epochs * num_update_steps_per_epoch
-    else:
-        args.num_train_epochs = math.ceil(args.max_train_steps / num_update_steps_per_epoch)
+        overrode_max_train_steps = True
 
     lr_scheduler = get_scheduler(
         name=args.lr_scheduler_type,
         optimizer=optimizer,
-        num_warmup_steps=args.num_warmup_steps,
-        num_training_steps=args.max_train_steps,
+        num_warmup_steps=args.num_warmup_steps * args.gradient_accumulation_steps,
+        num_training_steps=args.max_train_steps * args.gradient_accumulation_steps,
     )
 
     # Prepare everything with our `accelerator`.
@@ -490,20 +524,21 @@ def main():
 
     # We need to recalculate our total training steps as the size of the training dataloader may have changed.
     num_update_steps_per_epoch = math.ceil(len(train_dataloader) / args.gradient_accumulation_steps)
-    args.max_train_steps = args.num_train_epochs * num_update_steps_per_epoch
+    if overrode_max_train_steps:
+        args.max_train_steps = args.num_train_epochs * num_update_steps_per_epoch
+    # Afterwards we recalculate our number of training epochs
+    args.num_train_epochs = math.ceil(args.max_train_steps / num_update_steps_per_epoch)
 
     # Instantiate metric
-    metric = load_metric("mean_iou")
+    metric = evaluate.load("mean_iou")
 
     # We need to initialize the trackers we use, and also store our configuration.
-    # We initialize the trackers only on main process because `accelerator.log`
-    # only logs on main process and we don't want empty logs/runs on other processes.
+    # The trackers initializes automatically on the main process.
     if args.with_tracking:
-        if accelerator.is_main_process:
-            experiment_config = vars(args)
-            # TensorBoard cannot log Enums, need the raw value
-            experiment_config["lr_scheduler_type"] = experiment_config["lr_scheduler_type"].value
-            accelerator.init_trackers("semantic_segmentation_no_trainer", experiment_config)
+        experiment_config = vars(args)
+        # TensorBoard cannot log Enums, need the raw value
+        experiment_config["lr_scheduler_type"] = experiment_config["lr_scheduler_type"].value
+        accelerator.init_trackers("semantic_segmentation_no_trainer", experiment_config)
 
     # Train!
     total_batch_size = args.per_device_train_batch_size * accelerator.num_processes * args.gradient_accumulation_steps
@@ -523,52 +558,64 @@ def main():
     # Potentially load in the weights and states from a previous save
     if args.resume_from_checkpoint:
         if args.resume_from_checkpoint is not None or args.resume_from_checkpoint != "":
-            accelerator.print(f"Resumed from checkpoint: {args.resume_from_checkpoint}")
-            accelerator.load_state(args.resume_from_checkpoint)
+            checkpoint_path = args.resume_from_checkpoint
             path = os.path.basename(args.resume_from_checkpoint)
         else:
             # Get the most recent checkpoint
             dirs = [f.name for f in os.scandir(os.getcwd()) if f.is_dir()]
             dirs.sort(key=os.path.getctime)
             path = dirs[-1]  # Sorts folders by date modified, most recent checkpoint is the last
+            checkpoint_path = path
+            path = os.path.basename(checkpoint_path)
+
+        accelerator.print(f"Resumed from checkpoint: {checkpoint_path}")
+        accelerator.load_state(checkpoint_path)
         # Extract `epoch_{i}` or `step_{i}`
         training_difference = os.path.splitext(path)[0]
 
         if "epoch" in training_difference:
             starting_epoch = int(training_difference.replace("epoch_", "")) + 1
             resume_step = None
+            completed_steps = starting_epoch * num_update_steps_per_epoch
         else:
-            resume_step = int(training_difference.replace("step_", ""))
+            # need to multiply `gradient_accumulation_steps` to reflect real steps
+            resume_step = int(training_difference.replace("step_", "")) * args.gradient_accumulation_steps
             starting_epoch = resume_step // len(train_dataloader)
+            completed_steps = resume_step // args.gradient_accumulation_steps
             resume_step -= starting_epoch * len(train_dataloader)
 
+    # update the progress_bar if load from checkpoint
+    progress_bar.update(completed_steps)
+
     for epoch in range(starting_epoch, args.num_train_epochs):
+        model.train()
         if args.with_tracking:
             total_loss = 0
-        model.train()
-        for step, batch in enumerate(train_dataloader):
-            # We need to skip steps until we reach the resumed step
-            if args.resume_from_checkpoint and epoch == starting_epoch:
-                if resume_step is not None and step < resume_step:
-                    completed_steps += 1
-                    continue
-            outputs = model(**batch)
-            loss = outputs.loss
-            # We keep track of the loss at each epoch
-            if args.with_tracking:
-                total_loss += loss.detach().float()
-            loss = loss / args.gradient_accumulation_steps
-            accelerator.backward(loss)
-            if step % args.gradient_accumulation_steps == 0 or step == len(train_dataloader) - 1:
+        if args.resume_from_checkpoint and epoch == starting_epoch and resume_step is not None:
+            # We skip the first `n` batches in the dataloader when resuming from a checkpoint
+            active_dataloader = accelerator.skip_first_batches(train_dataloader, resume_step)
+        else:
+            active_dataloader = train_dataloader
+        for step, batch in enumerate(active_dataloader):
+            with accelerator.accumulate(model):
+                outputs = model(**batch)
+                loss = outputs.loss
+                # We keep track of the loss at each epoch
+                if args.with_tracking:
+                    total_loss += loss.detach().float()
+                accelerator.backward(loss)
                 optimizer.step()
                 lr_scheduler.step()
                 optimizer.zero_grad()
+
+            # Checks if the accelerator has performed an optimization step behind the scenes
+            if accelerator.sync_gradients:
                 progress_bar.update(1)
                 completed_steps += 1
 
             if isinstance(checkpointing_steps, int):
                 if completed_steps % checkpointing_steps == 0:
-                    output_dir = f"step_{completed_steps }"
+                    output_dir = f"step_{completed_steps}"
                     if args.output_dir is not None:
                         output_dir = os.path.join(args.output_dir, output_dir)
                     accelerator.save_state(output_dir)
@@ -582,7 +629,7 @@ def main():
                             save_function=accelerator.save,
                         )
                         if accelerator.is_main_process:
-                            feature_extractor.save_pretrained(args.output_dir)
+                            image_processor.save_pretrained(args.output_dir)
                             repo.push_to_hub(
                                 commit_message=f"Training in progress {completed_steps} steps",
                                 blocking=False,
@@ -594,7 +641,6 @@ def main():
 
         logger.info("***** Running evaluation *****")
         model.eval()
-        samples_seen = 0
         for step, batch in enumerate(tqdm(eval_dataloader, disable=not accelerator.is_local_main_process)):
             with torch.no_grad():
                 outputs = model(**batch)
@@ -604,15 +650,7 @@ def main():
             )
             predictions = upsampled_logits.argmax(dim=1)
 
-            predictions, references = accelerator.gather((predictions, batch["labels"]))
-
-            # If we are in a multiprocess environment, the last batch has duplicates
-            if accelerator.num_processes > 1:
-                if step == len(eval_dataloader) - 1:
-                    predictions = predictions[: len(eval_dataloader.dataset) - samples_seen]
-                    references = references[: len(eval_dataloader.dataset) - samples_seen]
-                else:
-                    samples_seen += references.shape[0]
+            predictions, references = accelerator.gather_for_metrics((predictions, batch["labels"]))
 
             metric.add_batch(
                 predictions=predictions,
@@ -646,7 +684,7 @@ def main():
                 args.output_dir, is_main_process=accelerator.is_main_process, save_function=accelerator.save
             )
             if accelerator.is_main_process:
-                feature_extractor.save_pretrained(args.output_dir)
+                image_processor.save_pretrained(args.output_dir)
                 repo.push_to_hub(
                     commit_message=f"Training in progress epoch {epoch}", blocking=False, auto_lfs_prune=True
                 )
@@ -657,6 +695,9 @@ def main():
                 output_dir = os.path.join(args.output_dir, output_dir)
             accelerator.save_state(output_dir)
 
+    if args.with_tracking:
+        accelerator.end_training()
+
     if args.output_dir is not None:
         accelerator.wait_for_everyone()
         unwrapped_model = accelerator.unwrap_model(model)
@@ -664,12 +705,15 @@ def main():
             args.output_dir, is_main_process=accelerator.is_main_process, save_function=accelerator.save
         )
         if accelerator.is_main_process:
-            feature_extractor.save_pretrained(args.output_dir)
+            image_processor.save_pretrained(args.output_dir)
             if args.push_to_hub:
                 repo.push_to_hub(commit_message="End of training", auto_lfs_prune=True)
 
+            all_results = {
+                f"eval_{k}": v.tolist() if isinstance(v, np.ndarray) else v for k, v in eval_metrics.items()
+            }
             with open(os.path.join(args.output_dir, "all_results.json"), "w") as f:
-                json.dump({"eval_overall_accuracy": eval_metrics["overall_accuracy"]}, f)
+                json.dump(all_results, f)
 
 
 if __name__ == "__main__":

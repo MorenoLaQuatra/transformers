@@ -69,9 +69,7 @@ class ReformerTokenizer(PreTrainedTokenizer):
         unk_token (`str`, *optional*, defaults to `"<unk>"`):
             The unknown token. A token that is not in the vocabulary cannot be converted to an ID and is set to be this
             token instead.
-        pad_token (`str`, *optional*, defaults to `"<pad>"`):
-            The token used for padding, for example when batching sequences of different lengths.
-        additional_special_tokens (`List[str]`, *optional*):
+        additional_special_tokens (`List[str]`, *optional*, defaults to `[]`):
             Additional special tokens used by the tokenizer.
         sp_model_kwargs (`dict`, *optional*):
             Will be passed to the `SentencePieceProcessor.__init__()` method. The [Python wrapper for
@@ -102,9 +100,13 @@ class ReformerTokenizer(PreTrainedTokenizer):
         unk_token="<unk>",
         additional_special_tokens=[],
         sp_model_kwargs: Optional[Dict[str, Any]] = None,
-        **kwargs
+        **kwargs,
     ) -> None:
         self.sp_model_kwargs = {} if sp_model_kwargs is None else sp_model_kwargs
+
+        self.vocab_file = vocab_file
+        self.sp_model = spm.SentencePieceProcessor(**self.sp_model_kwargs)
+        self.sp_model.Load(vocab_file)
 
         super().__init__(
             eos_token=eos_token,
@@ -113,10 +115,6 @@ class ReformerTokenizer(PreTrainedTokenizer):
             sp_model_kwargs=self.sp_model_kwargs,
             **kwargs,
         )
-
-        self.vocab_file = vocab_file
-        self.sp_model = spm.SentencePieceProcessor(**self.sp_model_kwargs)
-        self.sp_model.Load(vocab_file)
 
     @property
     def vocab_size(self):
@@ -158,8 +156,17 @@ class ReformerTokenizer(PreTrainedTokenizer):
 
     def convert_tokens_to_string(self, tokens):
         """Converts a sequence of tokens (string) in a single string."""
-        out_string = self.sp_model.decode_pieces(tokens)
-        return out_string
+        current_sub_tokens = []
+        out_string = ""
+        for token in tokens:
+            # make sure that special tokens are not decoded using sentencepiece model
+            if token in self.all_special_tokens:
+                out_string += self.sp_model.decode(current_sub_tokens) + token
+                current_sub_tokens = []
+            else:
+                current_sub_tokens.append(token)
+        out_string += self.sp_model.decode(current_sub_tokens)
+        return out_string.strip()
 
     def save_vocabulary(self, save_directory: str, filename_prefix: Optional[str] = None) -> Tuple[str]:
         if not os.path.isdir(save_directory):

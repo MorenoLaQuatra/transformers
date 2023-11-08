@@ -18,23 +18,24 @@ import logging
 import os
 import random
 import sys
+import warnings
 from dataclasses import dataclass, field
 from typing import Optional
 
-import datasets
+import evaluate
 import numpy as np
 import torch
 from datasets import load_dataset
+from huggingface_hub import hf_hub_download
 from PIL import Image
 from torch import nn
 from torchvision import transforms
 from torchvision.transforms import functional
 
 import transformers
-from huggingface_hub import hf_hub_download
 from transformers import (
     AutoConfig,
-    AutoFeatureExtractor,
+    AutoImageProcessor,
     AutoModelForSemanticSegmentation,
     HfArgumentParser,
     Trainer,
@@ -42,7 +43,7 @@ from transformers import (
     default_data_collator,
 )
 from transformers.trainer_utils import get_last_checkpoint
-from transformers.utils import check_min_version
+from transformers.utils import check_min_version, send_example_telemetry
 from transformers.utils.versions import require_version
 
 
@@ -51,18 +52,17 @@ from transformers.utils.versions import require_version
 logger = logging.getLogger(__name__)
 
 # Will error if the minimal version of Transformers is not installed. Remove at your own risks.
-check_min_version("4.20.0.dev0")
+check_min_version("4.36.0.dev0")
 
 require_version("datasets>=2.0.0", "To fix: pip install -r examples/pytorch/semantic-segmentation/requirements.txt")
 
 
 def pad_if_smaller(img, size, fill=0):
-    min_size = min(img.size)
-    if min_size < size:
-        original_width, original_height = img.size
-        pad_height = size - original_height if original_height < size else 0
-        pad_width = size - original_width if original_width < size else 0
-        img = functional.pad(img, (0, 0, pad_width, pad_height), fill=fill)
+    size = (size, size) if isinstance(size, int) else size
+    original_width, original_height = img.size
+    pad_height = size[1] - original_height if original_height < size[1] else 0
+    pad_width = size[0] - original_width if original_width < size[0] else 0
+    img = functional.pad(img, (0, 0, pad_width, pad_height), fill=fill)
     return img
 
 
@@ -110,12 +110,12 @@ class RandomResize:
 
 class RandomCrop:
     def __init__(self, size):
-        self.size = size
+        self.size = size if isinstance(size, tuple) else (size, size)
 
     def __call__(self, image, target):
         image = pad_if_smaller(image, self.size)
         target = pad_if_smaller(target, self.size, fill=255)
-        crop_params = transforms.RandomCrop.get_params(image, (self.size, self.size))
+        crop_params = transforms.RandomCrop.get_params(image, self.size)
         image = functional.crop(image, *crop_params)
         target = functional.crop(target, *crop_params)
         return image, target
@@ -241,13 +241,29 @@ class ModelArguments:
         default="main",
         metadata={"help": "The specific model version to use (can be a branch name, tag name or commit id)."},
     )
-    feature_extractor_name: str = field(default=None, metadata={"help": "Name or path of preprocessor config."})
+    image_processor_name: str = field(default=None, metadata={"help": "Name or path of preprocessor config."})
+    token: str = field(
+        default=None,
+        metadata={
+            "help": (
+                "The token to use as HTTP bearer authorization for remote files. If not specified, will use the token "
+                "generated when running `huggingface-cli login` (stored in `~/.huggingface`)."
+            )
+        },
+    )
     use_auth_token: bool = field(
+        default=None,
+        metadata={
+            "help": "The `use_auth_token` argument is deprecated and will be removed in v4.34. Please use `token` instead."
+        },
+    )
+    trust_remote_code: bool = field(
         default=False,
         metadata={
             "help": (
-                "Will use the token generated when running `transformers-cli login` (necessary to use this script "
-                "with private models)."
+                "Whether or not to allow for custom models defined on the Hub in their own modeling files. This option"
+                "should only be set to `True` for repositories you trust and in which you have read the code, as it will "
+                "execute code present on the Hub on your local machine."
             )
         },
     )
@@ -266,12 +282,29 @@ def main():
     else:
         model_args, data_args, training_args = parser.parse_args_into_dataclasses()
 
+    if model_args.use_auth_token is not None:
+        warnings.warn(
+            "The `use_auth_token` argument is deprecated and will be removed in v4.34. Please use `token` instead.",
+            FutureWarning,
+        )
+        if model_args.token is not None:
+            raise ValueError("`token` and `use_auth_token` are both specified. Please set only the argument `token`.")
+        model_args.token = model_args.use_auth_token
+
+    # Sending telemetry. Tracking the example usage helps us better allocate resources to maintain them. The
+    # information sent is the one passed as arguments along with your Python/PyTorch versions.
+    send_example_telemetry("run_semantic_segmentation", model_args, data_args)
+
     # Setup logging
     logging.basicConfig(
         format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
         datefmt="%m/%d/%Y %H:%M:%S",
         handlers=[logging.StreamHandler(sys.stdout)],
     )
+
+    if training_args.should_log:
+        # The default of training_args.log_level is passive, so we set log level at info here to have that default.
+        transformers.utils.logging.set_verbosity_info()
 
     log_level = training_args.get_process_log_level()
     logger.setLevel(log_level)
@@ -281,8 +314,8 @@ def main():
 
     # Log on each process the small summary:
     logger.warning(
-        f"Process rank: {training_args.local_rank}, device: {training_args.device}, n_gpu: {training_args.n_gpu}"
-        + f"distributed training: {bool(training_args.local_rank != -1)}, 16-bits training: {training_args.fp16}"
+        f"Process rank: {training_args.local_rank}, device: {training_args.device}, n_gpu: {training_args.n_gpu}, "
+        + f"distributed training: {training_args.parallel_mode.value == 'distributed'}, 16-bits training: {training_args.fp16}"
     )
     logger.info(f"Training/evaluation parameters {training_args}")
 
@@ -323,17 +356,17 @@ def main():
     # Prepare label mappings.
     # We'll include these in the model's config to get human readable labels in the Inference API.
     if data_args.dataset_name == "scene_parse_150":
-        repo_id = "datasets/huggingface/label-files"
+        repo_id = "huggingface/label-files"
         filename = "ade20k-id2label.json"
     else:
-        repo_id = f"datasets/{data_args.dataset_name}"
+        repo_id = data_args.dataset_name
         filename = "id2label.json"
-    id2label = json.load(open(hf_hub_download(repo_id, filename), "r"))
+    id2label = json.load(open(hf_hub_download(repo_id, filename, repo_type="dataset"), "r"))
     id2label = {int(k): v for k, v in id2label.items()}
     label2id = {v: str(k) for k, v in id2label.items()}
 
     # Load the mean IoU metric from the datasets package
-    metric = datasets.load_metric("mean_iou")
+    metric = evaluate.load("mean_iou")
 
     # Define our compute_metrics function. It takes an `EvalPrediction` object (a namedtuple with a
     # predictions and label_ids field) and has to return a dictionary string to float.
@@ -355,7 +388,7 @@ def main():
             references=labels,
             num_labels=len(id2label),
             ignore_index=0,
-            reduce_labels=feature_extractor.reduce_labels,
+            reduce_labels=image_processor.do_reduce_labels,
         )
         # add per category metrics as individual key-value pairs
         per_category_accuracy = metrics.pop("per_category_accuracy").tolist()
@@ -372,7 +405,8 @@ def main():
         id2label=id2label,
         cache_dir=model_args.cache_dir,
         revision=model_args.model_revision,
-        use_auth_token=True if model_args.use_auth_token else None,
+        token=model_args.token,
+        trust_remote_code=model_args.trust_remote_code,
     )
     model = AutoModelForSemanticSegmentation.from_pretrained(
         model_args.model_name_or_path,
@@ -380,26 +414,33 @@ def main():
         config=config,
         cache_dir=model_args.cache_dir,
         revision=model_args.model_revision,
-        use_auth_token=True if model_args.use_auth_token else None,
+        token=model_args.token,
+        trust_remote_code=model_args.trust_remote_code,
     )
-    feature_extractor = AutoFeatureExtractor.from_pretrained(
-        model_args.feature_extractor_name or model_args.model_name_or_path,
+    image_processor = AutoImageProcessor.from_pretrained(
+        model_args.image_processor_name or model_args.model_name_or_path,
         cache_dir=model_args.cache_dir,
         revision=model_args.model_revision,
-        use_auth_token=True if model_args.use_auth_token else None,
+        token=model_args.token,
+        trust_remote_code=model_args.trust_remote_code,
     )
 
     # Define torchvision transforms to be applied to each image + target.
     # Not that straightforward in torchvision: https://github.com/pytorch/vision/issues/9
     # Currently based on official torchvision references: https://github.com/pytorch/vision/blob/main/references/segmentation/transforms.py
+    if "shortest_edge" in image_processor.size:
+        # We instead set the target size as (shortest_edge, shortest_edge) to here to ensure all images are batchable.
+        size = (image_processor.size["shortest_edge"], image_processor.size["shortest_edge"])
+    else:
+        size = (image_processor.size["height"], image_processor.size["width"])
     train_transforms = Compose(
         [
             ReduceLabels() if data_args.reduce_labels else Identity(),
-            RandomCrop(size=feature_extractor.size),
+            RandomCrop(size=size),
             RandomHorizontalFlip(flip_prob=0.5),
             PILToTensor(),
             ConvertImageDtype(torch.float),
-            Normalize(mean=feature_extractor.image_mean, std=feature_extractor.image_std),
+            Normalize(mean=image_processor.image_mean, std=image_processor.image_std),
         ]
     )
     # Define torchvision transform to be applied to each image.
@@ -407,10 +448,10 @@ def main():
     val_transforms = Compose(
         [
             ReduceLabels() if data_args.reduce_labels else Identity(),
-            Resize(size=(feature_extractor.size, feature_extractor.size)),
+            Resize(size=size),
             PILToTensor(),
             ConvertImageDtype(torch.float),
-            Normalize(mean=feature_extractor.image_mean, std=feature_extractor.image_std),
+            Normalize(mean=image_processor.image_mean, std=image_processor.image_std),
         ]
     )
 
@@ -422,7 +463,7 @@ def main():
             pixel_values.append(image)
             labels.append(target)
 
-        encoding = dict()
+        encoding = {}
         encoding["pixel_values"] = torch.stack(pixel_values)
         encoding["labels"] = torch.stack(labels)
 
@@ -436,7 +477,7 @@ def main():
             pixel_values.append(image)
             labels.append(target)
 
-        encoding = dict()
+        encoding = {}
         encoding["pixel_values"] = torch.stack(pixel_values)
         encoding["labels"] = torch.stack(labels)
 
@@ -469,7 +510,7 @@ def main():
         train_dataset=dataset["train"] if training_args.do_train else None,
         eval_dataset=dataset["validation"] if training_args.do_eval else None,
         compute_metrics=compute_metrics,
-        tokenizer=feature_extractor,
+        tokenizer=image_processor,
         data_collator=default_data_collator,
     )
 

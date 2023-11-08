@@ -51,15 +51,19 @@ class BertGenerationTokenizer(PreTrainedTokenizer):
         vocab_file (`str`):
             [SentencePiece](https://github.com/google/sentencepiece) file (generally has a *.spm* extension) that
             contains the vocabulary necessary to instantiate a tokenizer.
-        eos_token (`str`, *optional*, defaults to `"</s>"`):
-            The end of sequence token.
         bos_token (`str`, *optional*, defaults to `"<s>"`):
             The begin of sequence token.
+        eos_token (`str`, *optional*, defaults to `"</s>"`):
+            The end of sequence token.
         unk_token (`str`, *optional*, defaults to `"<unk>"`):
             The unknown token. A token that is not in the vocabulary cannot be converted to an ID and is set to be this
             token instead.
         pad_token (`str`, *optional*, defaults to `"<pad>"`):
             The token used for padding, for example when batching sequences of different lengths.
+        sep_token (`str`, *optional*, defaults to `"<::::>"`):
+            The separator token, which is used when building a sequence from multiple sequences, e.g. two sequences for
+            sequence classification or for a text and a question for question answering. It is also used as the last
+            token of a sequence built with special tokens.
         sp_model_kwargs (`dict`, *optional*):
             Will be passed to the `SentencePieceProcessor.__init__()` method. The [Python wrapper for
             SentencePiece](https://github.com/google/sentencepiece/tree/master/python) can be used, among other things,
@@ -92,9 +96,14 @@ class BertGenerationTokenizer(PreTrainedTokenizer):
         pad_token="<pad>",
         sep_token="<::::>",
         sp_model_kwargs: Optional[Dict[str, Any]] = None,
-        **kwargs
+        **kwargs,
     ) -> None:
         self.sp_model_kwargs = {} if sp_model_kwargs is None else sp_model_kwargs
+
+        self.vocab_file = vocab_file
+
+        self.sp_model = spm.SentencePieceProcessor(**self.sp_model_kwargs)
+        self.sp_model.Load(vocab_file)
 
         # Add extra_ids to the special token list
         super().__init__(
@@ -106,11 +115,6 @@ class BertGenerationTokenizer(PreTrainedTokenizer):
             sp_model_kwargs=self.sp_model_kwargs,
             **kwargs,
         )
-
-        self.vocab_file = vocab_file
-
-        self.sp_model = spm.SentencePieceProcessor(**self.sp_model_kwargs)
-        self.sp_model.Load(vocab_file)
 
     @property
     def vocab_size(self):
@@ -151,8 +155,17 @@ class BertGenerationTokenizer(PreTrainedTokenizer):
 
     def convert_tokens_to_string(self, tokens):
         """Converts a sequence of tokens (string) in a single string."""
-        out_string = self.sp_model.decode_pieces(tokens)
-        return out_string
+        current_sub_tokens = []
+        out_string = ""
+        for token in tokens:
+            # make sure that special tokens are not decoded using sentencepiece model
+            if token in self.all_special_tokens:
+                out_string += self.sp_model.decode(current_sub_tokens) + token
+                current_sub_tokens = []
+            else:
+                current_sub_tokens.append(token)
+        out_string += self.sp_model.decode(current_sub_tokens)
+        return out_string.strip()
 
     def save_vocabulary(self, save_directory: str, filename_prefix: Optional[str] = None) -> Tuple[str]:
         if not os.path.isdir(save_directory):

@@ -16,7 +16,7 @@
 
 
 import json
-from typing import TYPE_CHECKING, List, Optional, Tuple
+from typing import Optional, Tuple
 
 from tokenizers import pre_tokenizers
 
@@ -24,10 +24,6 @@ from ...tokenization_utils_base import BatchEncoding
 from ...tokenization_utils_fast import PreTrainedTokenizerFast
 from ...utils import logging
 from .tokenization_gpt2 import GPT2Tokenizer
-
-
-if TYPE_CHECKING:
-    from transformers.pipelines.conversational import Conversation
 
 
 logger = logging.get_logger(__name__)
@@ -75,12 +71,14 @@ class GPT2TokenizerFast(PreTrainedTokenizerFast):
     This tokenizer has been trained to treat spaces like parts of the tokens (a bit like sentencepiece) so a word will
     be encoded differently whether it is at the beginning of the sentence (without space) or not:
 
-    ```
+    ```python
     >>> from transformers import GPT2TokenizerFast
+
     >>> tokenizer = GPT2TokenizerFast.from_pretrained("gpt2")
-    >>> tokenizer("Hello world")['input_ids']
+    >>> tokenizer("Hello world")["input_ids"]
     [15496, 995]
-    >>> tokenizer(" Hello world")['input_ids']
+
+    >>> tokenizer(" Hello world")["input_ids"]
     [18435, 995]
     ```
 
@@ -97,25 +95,23 @@ class GPT2TokenizerFast(PreTrainedTokenizerFast):
     refer to this superclass for more information regarding those methods.
 
     Args:
-        vocab_file (`str`):
+        vocab_file (`str`, *optional*):
             Path to the vocabulary file.
-        merges_file (`str`):
+        merges_file (`str`, *optional*):
             Path to the merges file.
-        errors (`str`, *optional*, defaults to `"replace"`):
-            Paradigm to follow when decoding bytes to UTF-8. See
-            [bytes.decode](https://docs.python.org/3/library/stdtypes.html#bytes.decode) for more information.
-        unk_token (`str`, *optional*, defaults to `<|endoftext|>`):
+        tokenizer_file (`str`, *optional*):
+            Path to [tokenizers](https://github.com/huggingface/tokenizers) file (generally has a .json extension) that
+            contains everything needed to load the tokenizer.
+        unk_token (`str`, *optional*, defaults to `"<|endoftext|>"`):
             The unknown token. A token that is not in the vocabulary cannot be converted to an ID and is set to be this
             token instead.
-        bos_token (`str`, *optional*, defaults to `<|endoftext|>`):
+        bos_token (`str`, *optional*, defaults to `"<|endoftext|>"`):
             The beginning of sequence token.
-        eos_token (`str`, *optional*, defaults to `<|endoftext|>`):
+        eos_token (`str`, *optional*, defaults to `"<|endoftext|>"`):
             The end of sequence token.
         add_prefix_space (`bool`, *optional*, defaults to `False`):
             Whether or not to add an initial space to the input. This allows to treat the leading word just as any
             other word. (GPT2 tokenizer detect beginning of words by the preceding space).
-        trim_offsets (`bool`, *optional*, defaults to `True`):
-            Whether or not the post-processing step should trim offsets to avoid including whitespaces.
     """
 
     vocab_files_names = VOCAB_FILES_NAMES
@@ -133,7 +129,7 @@ class GPT2TokenizerFast(PreTrainedTokenizerFast):
         bos_token="<|endoftext|>",
         eos_token="<|endoftext|>",
         add_prefix_space=False,
-        **kwargs
+        **kwargs,
     ):
         super().__init__(
             vocab_file,
@@ -146,16 +142,7 @@ class GPT2TokenizerFast(PreTrainedTokenizerFast):
             **kwargs,
         )
 
-        if kwargs.pop("add_bos_token", False):
-            model_id = kwargs.pop("name_or_path", "")
-            raise ValueError(
-                "Currenty GPT2's fast tokenizer does NOT support adding a BOS token."
-                "Instead you should use GPT2's slow tokenizer class `GPT2Tokenizer` as follows: \n"
-                f"`GPT2Tokenizer.from_pretrained('{model_id}')`\nor\n"
-                f"`AutoTokenizer.from_pretrained('{model_id}', use_fast=False)`\n"
-                "This issue will be fixed soon, see: https://github.com/huggingface/tokenizers/pull/1005."
-                " so that the fast tokenizer works correctly."
-            )
+        self.add_bos_token = kwargs.pop("add_bos_token", False)
 
         pre_tok_state = json.loads(self.backend_tokenizer.pre_tokenizer.__getstate__())
         if pre_tok_state.get("add_prefix_space", add_prefix_space) != add_prefix_space:
@@ -188,12 +175,16 @@ class GPT2TokenizerFast(PreTrainedTokenizerFast):
         files = self._tokenizer.model.save(save_directory, name=filename_prefix)
         return tuple(files)
 
-    def _build_conversation_input_ids(self, conversation: "Conversation") -> List[int]:
-        """This corresponds to DialoGPT variants of models."""
-        input_ids = []
-        for is_user, text in conversation.iter_texts():
-            input_ids.extend(self.encode(text, add_special_tokens=False) + [self.eos_token_id])
-
-        if len(input_ids) > self.model_max_length:
-            input_ids = input_ids[-self.model_max_length :]
-        return input_ids
+    @property
+    # Copied from transformers.models.gpt2.tokenization_gpt2.GPT2Tokenizer.default_chat_template
+    def default_chat_template(self):
+        """
+        A simple chat template that ignores role information and just concatenates messages with EOS tokens.
+        """
+        logger.warning_once(
+            "\nNo chat template is defined for this tokenizer - using the default template "
+            f"for the {self.__class__.__name__} class. If the default is not appropriate for "
+            "your model, please set `tokenizer.chat_template` to an appropriate template. "
+            "See https://huggingface.co/docs/transformers/main/chat_templating for more information.\n"
+        )
+        return "{% for message in messages %}" "{{ message.content }}{{ eos_token }}" "{% endfor %}"

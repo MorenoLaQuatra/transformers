@@ -571,7 +571,7 @@ class XLMTokenizer(PreTrainedTokenizer):
         mask_token (`str`, *optional*, defaults to `"<special1>"`):
             The token used for masking values. This is the token used when training this model with masked language
             modeling. This is the token which the model will try to predict.
-        additional_special_tokens (`List[str]`, *optional*, defaults to `["<special0>","<special1>","<special2>","<special3>","<special4>","<special5>","<special6>","<special7>","<special8>","<special9>"]`):
+        additional_special_tokens (`List[str]`, *optional*, defaults to `['<special0>', '<special1>', '<special2>', '<special3>', '<special4>', '<special5>', '<special6>', '<special7>', '<special8>', '<special9>']`):
             List of additional special tokens.
         lang2id (`Dict[str, int]`, *optional*):
             Dictionary mapping languages string identifiers to their IDs.
@@ -611,22 +611,8 @@ class XLMTokenizer(PreTrainedTokenizer):
         lang2id=None,
         id2lang=None,
         do_lowercase_and_remove_accent=True,
-        **kwargs
+        **kwargs,
     ):
-        super().__init__(
-            unk_token=unk_token,
-            bos_token=bos_token,
-            sep_token=sep_token,
-            pad_token=pad_token,
-            cls_token=cls_token,
-            mask_token=mask_token,
-            additional_special_tokens=additional_special_tokens,
-            lang2id=lang2id,
-            id2lang=id2lang,
-            do_lowercase_and_remove_accent=do_lowercase_and_remove_accent,
-            **kwargs,
-        )
-
         try:
             import sacremoses
         except ImportError:
@@ -638,10 +624,10 @@ class XLMTokenizer(PreTrainedTokenizer):
         self.sm = sacremoses
 
         # cache of sm.MosesPunctNormalizer instance
-        self.cache_moses_punct_normalizer = dict()
+        self.cache_moses_punct_normalizer = {}
         # cache of sm.MosesTokenizer instance
-        self.cache_moses_tokenizer = dict()
-        self.lang_with_custom_tokenizer = set(["zh", "th", "ja"])
+        self.cache_moses_tokenizer = {}
+        self.lang_with_custom_tokenizer = {"zh", "th", "ja"}
         # True for current supported model (v1.2.0), False for XLM-17 & 100
         self.do_lowercase_and_remove_accent = do_lowercase_and_remove_accent
         self.lang2id = lang2id
@@ -660,6 +646,19 @@ class XLMTokenizer(PreTrainedTokenizer):
         merges = [tuple(merge.split()[:2]) for merge in merges]
         self.bpe_ranks = dict(zip(merges, range(len(merges))))
         self.cache = {}
+        super().__init__(
+            unk_token=unk_token,
+            bos_token=bos_token,
+            sep_token=sep_token,
+            pad_token=pad_token,
+            cls_token=cls_token,
+            mask_token=mask_token,
+            additional_special_tokens=additional_special_tokens,
+            lang2id=lang2id,
+            id2lang=id2lang,
+            do_lowercase_and_remove_accent=do_lowercase_and_remove_accent,
+            **kwargs,
+        )
 
     @property
     def do_lower_case(self):
@@ -791,7 +790,6 @@ class XLMTokenizer(PreTrainedTokenizer):
         externally, and set `bypass_tokenizer=True` to bypass the tokenizer.
 
         Args:
-
             - lang: ISO language code (default = 'en') (string). Languages should belong of the model supported
               languages. However, we don't enforce it.
             - bypass_tokenizer: Allow users to preprocess and tokenize the sentences externally (default = False)
@@ -852,7 +850,7 @@ class XLMTokenizer(PreTrainedTokenizer):
         split_tokens = []
         for token in text:
             if token:
-                split_tokens.extend([t for t in self.bpe(token).split(" ")])
+                split_tokens.extend(list(self.bpe(token).split(" ")))
 
         return split_tokens
 

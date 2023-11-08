@@ -108,17 +108,8 @@ class Speech2Text2Tokenizer(PreTrainedTokenizer):
         unk_token="<unk>",
         do_lower_case=False,
         merges_file=None,
-        **kwargs
+        **kwargs,
     ):
-        super().__init__(
-            unk_token=unk_token,
-            bos_token=bos_token,
-            eos_token=eos_token,
-            pad_token=pad_token,
-            do_lower_case=do_lower_case,
-            **kwargs,
-        )
-
         self.do_lower_case = do_lower_case
 
         with open(vocab_file, encoding="utf-8") as vocab_handle:
@@ -137,6 +128,14 @@ class Speech2Text2Tokenizer(PreTrainedTokenizer):
             merges = [tuple(merge.split()[:2]) for merge in merges]
             self.bpe_ranks = dict(zip(merges, range(len(merges))))
             self.cache = {}
+        super().__init__(
+            unk_token=unk_token,
+            bos_token=bos_token,
+            eos_token=eos_token,
+            pad_token=pad_token,
+            do_lower_case=do_lower_case,
+            **kwargs,
+        )
 
     @property
     def vocab_size(self) -> int:
@@ -200,7 +199,7 @@ class Speech2Text2Tokenizer(PreTrainedTokenizer):
         if self.bpe_ranks is None:
             raise ValueError(
                 "This tokenizer was instantiated without a `merges.txt` file, so"
-                " that it can only be used for decoding, not for encoding."
+                " that it can only be used for decoding, not for encoding. "
                 "Make sure to provide `merges.txt` file at instantiation to enable "
                 "encoding."
             )
@@ -213,7 +212,7 @@ class Speech2Text2Tokenizer(PreTrainedTokenizer):
         split_tokens = []
         for token in text:
             if token:
-                split_tokens.extend([t for t in self.bpe(token).split(" ")])
+                split_tokens.extend(list(self.bpe(token).split(" ")))
 
         return split_tokens
 

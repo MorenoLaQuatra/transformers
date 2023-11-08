@@ -120,7 +120,6 @@ class NotebookProgressBar:
         The main method to update the progress bar to `value`.
 
         Args:
-
             value (`int`):
                 The value to use. Must be between 0 and `total`.
             force_update (`bool`, *optional*, defaults to `False`):
@@ -204,7 +203,6 @@ class NotebookTrainingTracker(NotebookProgressBar):
     An object tracking the updates of an ongoing training with progress bars and a nice table reporting metrics.
 
     Args:
-
         num_steps (`int`): The number of steps during training. column_names (`List[str]`, *optional*):
             The list of column names for the metrics table (will be inferred from the first call to
             [`~utils.notebook.NotebookTrainingTracker.write_line`] if not set).
@@ -237,13 +235,25 @@ class NotebookTrainingTracker(NotebookProgressBar):
             self.inner_table = [list(values.keys()), list(values.values())]
         else:
             columns = self.inner_table[0]
-            if len(self.inner_table) == 1:
-                # We give a chance to update the column names at the first iteration
-                for key in values.keys():
-                    if key not in columns:
-                        columns.append(key)
-                self.inner_table[0] = columns
-            self.inner_table.append([values[c] for c in columns])
+            for key in values.keys():
+                if key not in columns:
+                    columns.append(key)
+            self.inner_table[0] = columns
+            if len(self.inner_table) > 1:
+                last_values = self.inner_table[-1]
+                first_column = self.inner_table[0][0]
+                if last_values[0] != values[first_column]:
+                    # write new line
+                    self.inner_table.append([values[c] if c in values else "No Log" for c in columns])
+                else:
+                    # update last line
+                    new_values = values
+                    for c in columns:
+                        if c not in new_values.keys():
+                            new_values[c] = last_values[columns.index(c)]
+                    self.inner_table[-1] = [new_values[c] for c in columns]
+            else:
+                self.inner_table.append([values[c] for c in columns])
 
     def add_child(self, total, prefix=None, width=300):
         """
@@ -307,6 +317,11 @@ class NotebookProgressCallback(TrainerCallback):
         else:
             self.prediction_bar.update(self.prediction_bar.value + 1)
 
+    def on_predict(self, args, state, control, **kwargs):
+        if self.prediction_bar is not None:
+            self.prediction_bar.close()
+        self.prediction_bar = None
+
     def on_log(self, args, state, control, logs=None, **kwargs):
         # Only for when there is no evaluation
         if args.evaluation_strategy == IntervalStrategy.NO and "loss" in logs:
@@ -336,13 +351,14 @@ class NotebookProgressCallback(TrainerCallback):
             _ = metrics.pop(f"{metric_key_prefix}_runtime", None)
             _ = metrics.pop(f"{metric_key_prefix}_samples_per_second", None)
             _ = metrics.pop(f"{metric_key_prefix}_steps_per_second", None)
+            _ = metrics.pop(f"{metric_key_prefix}_jit_compilation_time", None)
             for k, v in metrics.items():
-                if k == f"{metric_key_prefix}_loss":
-                    values["Validation Loss"] = v
-                else:
-                    splits = k.split("_")
-                    name = " ".join([part.capitalize() for part in splits[1:]])
-                    values[name] = v
+                splits = k.split("_")
+                name = " ".join([part.capitalize() for part in splits[1:]])
+                if name == "Loss":
+                    # Single dataset
+                    name = "Validation Loss"
+                values[name] = v
             self.training_tracker.write_line(values)
             self.training_tracker.remove_child()
             self.prediction_bar = None

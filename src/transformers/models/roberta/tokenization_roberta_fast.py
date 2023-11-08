@@ -81,12 +81,14 @@ class RobertaTokenizerFast(PreTrainedTokenizerFast):
     This tokenizer has been trained to treat spaces like parts of the tokens (a bit like sentencepiece) so a word will
     be encoded differently whether it is at the beginning of the sentence (without space) or not:
 
-    ```
+    ```python
     >>> from transformers import RobertaTokenizerFast
+
     >>> tokenizer = RobertaTokenizerFast.from_pretrained("roberta-base")
-    >>> tokenizer("Hello world")['input_ids']
-    [0, 31414, 232, 328, 2]
-    >>> tokenizer(" Hello world")['input_ids']
+    >>> tokenizer("Hello world")["input_ids"]
+    [0, 31414, 232, 2]
+
+    >>> tokenizer(" Hello world")["input_ids"]
     [0, 20920, 232, 2]
     ```
 
@@ -173,8 +175,13 @@ class RobertaTokenizerFast(PreTrainedTokenizerFast):
         mask_token="<mask>",
         add_prefix_space=False,
         trim_offsets=True,
-        **kwargs
+        **kwargs,
     ):
+        mask_token = (
+            AddedToken(mask_token, lstrip=True, rstrip=False, normalized=False)
+            if isinstance(mask_token, str)
+            else mask_token
+        )
         super().__init__(
             vocab_file,
             merges_file,
@@ -235,8 +242,9 @@ class RobertaTokenizerFast(PreTrainedTokenizerFast):
         Roberta tokenizer has a special mask token to be usable in the fill-mask pipeline. The mask token will greedily
         comprise the space before the *<mask>*.
         """
-        if self._mask_token is None and self.verbose:
-            logger.error("Using mask_token, but it is not set yet.")
+        if self._mask_token is None:
+            if self.verbose:
+                logger.error("Using mask_token, but it is not set yet.")
             return None
         return str(self._mask_token)
 

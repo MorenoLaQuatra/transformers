@@ -23,11 +23,12 @@ from packaging import version
 
 from transformers import BeitConfig
 from transformers.models.auto import get_values
-from transformers.testing_utils import require_torch, require_vision, slow, torch_device
+from transformers.testing_utils import require_torch, require_torch_multi_gpu, require_vision, slow, torch_device
 from transformers.utils import cached_property, is_torch_available, is_vision_available
 
 from ...test_configuration_common import ConfigTester
 from ...test_modeling_common import ModelTesterMixin, _config_zero_init, floats_tensor, ids_tensor
+from ...test_pipeline_mixin import PipelineTesterMixin
 
 
 if is_torch_available():
@@ -48,7 +49,7 @@ if is_vision_available():
     import PIL
     from PIL import Image
 
-    from transformers import BeitFeatureExtractor
+    from transformers import BeitImageProcessor
 
 
 class BeitModelTester:
@@ -63,7 +64,7 @@ class BeitModelTester:
         is_training=True,
         use_labels=True,
         hidden_size=32,
-        num_hidden_layers=4,
+        num_hidden_layers=2,
         num_attention_heads=4,
         intermediate_size=37,
         hidden_act="gelu",
@@ -153,6 +154,16 @@ class BeitModelTester:
         result = model(pixel_values, labels=labels)
         self.parent.assertEqual(result.logits.shape, (self.batch_size, self.type_sequence_label_size))
 
+        # test greyscale images
+        config.num_channels = 1
+        model = BeitForImageClassification(config)
+        model.to(torch_device)
+        model.eval()
+
+        pixel_values = floats_tensor([self.batch_size, 1, self.image_size, self.image_size])
+        result = model(pixel_values, labels=labels)
+        self.parent.assertEqual(result.logits.shape, (self.batch_size, self.type_sequence_label_size))
+
     def create_and_check_for_semantic_segmentation(self, config, pixel_values, labels, pixel_labels):
         config.num_labels = self.num_labels
         model = BeitForSemanticSegmentation(config)
@@ -175,7 +186,7 @@ class BeitModelTester:
 
 
 @require_torch
-class BeitModelTest(ModelTesterMixin, unittest.TestCase):
+class BeitModelTest(ModelTesterMixin, PipelineTesterMixin, unittest.TestCase):
     """
     Here we also overwrite some of the tests of test_modeling_common.py, as BEiT does not use input_ids, inputs_embeds,
     attention_mask and seq_length.
@@ -185,6 +196,15 @@ class BeitModelTest(ModelTesterMixin, unittest.TestCase):
         (BeitModel, BeitForImageClassification, BeitForMaskedImageModeling, BeitForSemanticSegmentation)
         if is_torch_available()
         else ()
+    )
+    pipeline_model_mapping = (
+        {
+            "feature-extraction": BeitModel,
+            "image-classification": BeitForImageClassification,
+            "image-segmentation": BeitForSemanticSegmentation,
+        }
+        if is_torch_available()
+        else {}
     )
 
     test_pruning = False
@@ -200,6 +220,11 @@ class BeitModelTest(ModelTesterMixin, unittest.TestCase):
 
     @unittest.skip(reason="BEiT does not use inputs_embeds")
     def test_inputs_embeds(self):
+        pass
+
+    @require_torch_multi_gpu
+    @unittest.skip(reason="BEiT has some layers using `add_module` which doesn't work well with `nn.DataParallel`")
+    def test_multi_gpu_data_parallel_forward(self):
         pass
 
     def test_model_common_attributes(self):
@@ -282,6 +307,18 @@ class BeitModelTest(ModelTesterMixin, unittest.TestCase):
             loss = model(**inputs).loss
             loss.backward()
 
+    @unittest.skip(
+        reason="This architecure seem to not compute gradients properly when using GC, check: https://github.com/huggingface/transformers/pull/27124"
+    )
+    def test_training_gradient_checkpointing_use_reentrant(self):
+        pass
+
+    @unittest.skip(
+        reason="This architecure seem to not compute gradients properly when using GC, check: https://github.com/huggingface/transformers/pull/27124"
+    )
+    def test_training_gradient_checkpointing_use_reentrant_false(self):
+        pass
+
     def test_initialization(self):
         config, inputs_dict = self.model_tester.prepare_config_and_inputs_for_common()
 
@@ -317,18 +354,16 @@ def prepare_img():
 @require_vision
 class BeitModelIntegrationTest(unittest.TestCase):
     @cached_property
-    def default_feature_extractor(self):
-        return (
-            BeitFeatureExtractor.from_pretrained("microsoft/beit-base-patch16-224") if is_vision_available() else None
-        )
+    def default_image_processor(self):
+        return BeitImageProcessor.from_pretrained("microsoft/beit-base-patch16-224") if is_vision_available() else None
 
     @slow
     def test_inference_masked_image_modeling_head(self):
         model = BeitForMaskedImageModeling.from_pretrained("microsoft/beit-base-patch16-224-pt22k").to(torch_device)
 
-        feature_extractor = self.default_feature_extractor
+        image_processor = self.default_image_processor
         image = prepare_img()
-        pixel_values = feature_extractor(images=image, return_tensors="pt").pixel_values.to(torch_device)
+        pixel_values = image_processor(images=image, return_tensors="pt").pixel_values.to(torch_device)
 
         # prepare bool_masked_pos
         bool_masked_pos = torch.ones((1, 196), dtype=torch.bool).to(torch_device)
@@ -352,9 +387,9 @@ class BeitModelIntegrationTest(unittest.TestCase):
     def test_inference_image_classification_head_imagenet_1k(self):
         model = BeitForImageClassification.from_pretrained("microsoft/beit-base-patch16-224").to(torch_device)
 
-        feature_extractor = self.default_feature_extractor
+        image_processor = self.default_image_processor
         image = prepare_img()
-        inputs = feature_extractor(images=image, return_tensors="pt").to(torch_device)
+        inputs = image_processor(images=image, return_tensors="pt").to(torch_device)
 
         # forward pass
         with torch.no_grad():
@@ -378,9 +413,9 @@ class BeitModelIntegrationTest(unittest.TestCase):
             torch_device
         )
 
-        feature_extractor = self.default_feature_extractor
+        image_processor = self.default_image_processor
         image = prepare_img()
-        inputs = feature_extractor(images=image, return_tensors="pt").to(torch_device)
+        inputs = image_processor(images=image, return_tensors="pt").to(torch_device)
 
         # forward pass
         with torch.no_grad():
@@ -403,11 +438,11 @@ class BeitModelIntegrationTest(unittest.TestCase):
         model = BeitForSemanticSegmentation.from_pretrained("microsoft/beit-base-finetuned-ade-640-640")
         model = model.to(torch_device)
 
-        feature_extractor = BeitFeatureExtractor(do_resize=True, size=640, do_center_crop=False)
+        image_processor = BeitImageProcessor(do_resize=True, size=640, do_center_crop=False)
 
         ds = load_dataset("hf-internal-testing/fixtures_ade20k", split="test")
         image = Image.open(ds[0]["file"])
-        inputs = feature_extractor(images=image, return_tensors="pt").to(torch_device)
+        inputs = image_processor(images=image, return_tensors="pt").to(torch_device)
 
         # forward pass
         with torch.no_grad():
@@ -440,3 +475,28 @@ class BeitModelIntegrationTest(unittest.TestCase):
             )
 
         self.assertTrue(torch.allclose(logits[0, :3, :3, :3], expected_slice, atol=1e-4))
+
+    @slow
+    def test_post_processing_semantic_segmentation(self):
+        model = BeitForSemanticSegmentation.from_pretrained("microsoft/beit-base-finetuned-ade-640-640")
+        model = model.to(torch_device)
+
+        image_processor = BeitImageProcessor(do_resize=True, size=640, do_center_crop=False)
+
+        ds = load_dataset("hf-internal-testing/fixtures_ade20k", split="test")
+        image = Image.open(ds[0]["file"])
+        inputs = image_processor(images=image, return_tensors="pt").to(torch_device)
+
+        # forward pass
+        with torch.no_grad():
+            outputs = model(**inputs)
+
+        outputs.logits = outputs.logits.detach().cpu()
+
+        segmentation = image_processor.post_process_semantic_segmentation(outputs=outputs, target_sizes=[(500, 300)])
+        expected_shape = torch.Size((500, 300))
+        self.assertEqual(segmentation[0].shape, expected_shape)
+
+        segmentation = image_processor.post_process_semantic_segmentation(outputs=outputs)
+        expected_shape = torch.Size((160, 160))
+        self.assertEqual(segmentation[0].shape, expected_shape)

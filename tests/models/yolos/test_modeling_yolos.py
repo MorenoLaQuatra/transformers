@@ -24,6 +24,7 @@ from transformers.utils import cached_property, is_torch_available, is_vision_av
 
 from ...test_configuration_common import ConfigTester
 from ...test_modeling_common import ModelTesterMixin, floats_tensor
+from ...test_pipeline_mixin import PipelineTesterMixin
 
 
 if is_torch_available():
@@ -31,13 +32,13 @@ if is_torch_available():
     from torch import nn
 
     from transformers import YolosForObjectDetection, YolosModel
-    from transformers.models.yolos.modeling_yolos import YOLOS_PRETRAINED_MODEL_ARCHIVE_LIST, to_2tuple
+    from transformers.models.yolos.modeling_yolos import YOLOS_PRETRAINED_MODEL_ARCHIVE_LIST
 
 
 if is_vision_available():
     from PIL import Image
 
-    from transformers import AutoFeatureExtractor
+    from transformers import AutoImageProcessor
 
 
 class YolosModelTester:
@@ -51,7 +52,7 @@ class YolosModelTester:
         is_training=True,
         use_labels=True,
         hidden_size=32,
-        num_hidden_layers=5,
+        num_hidden_layers=2,
         num_attention_heads=4,
         intermediate_size=37,
         hidden_act="gelu",
@@ -86,9 +87,7 @@ class YolosModelTester:
         self.num_detection_tokens = num_detection_tokens
         # we set the expected sequence length (which is used in several tests)
         # expected sequence length = num_patches + 1 (we add 1 for the [CLS] token) + num_detection_tokens
-        image_size = to_2tuple(self.image_size)
-        patch_size = to_2tuple(self.patch_size)
-        num_patches = (image_size[1] // patch_size[1]) * (image_size[0] // patch_size[0])
+        num_patches = (image_size[1] // patch_size) * (image_size[0] // patch_size)
         self.expected_seq_len = num_patches + 1 + self.num_detection_tokens
 
     def prepare_config_and_inputs(self):
@@ -162,13 +161,16 @@ class YolosModelTester:
 
 
 @require_torch
-class YolosModelTest(ModelTesterMixin, unittest.TestCase):
+class YolosModelTest(ModelTesterMixin, PipelineTesterMixin, unittest.TestCase):
     """
     Here we also overwrite some of the tests of test_modeling_common.py, as YOLOS does not use input_ids, inputs_embeds,
     attention_mask and seq_length.
     """
 
     all_model_classes = (YolosModel, YolosForObjectDetection) if is_torch_available() else ()
+    pipeline_model_mapping = (
+        {"feature-extraction": YolosModel, "object-detection": YolosForObjectDetection} if is_torch_available() else {}
+    )
 
     test_pruning = False
     test_resize_embeddings = False
@@ -343,22 +345,22 @@ def prepare_img():
 @require_vision
 class YolosModelIntegrationTest(unittest.TestCase):
     @cached_property
-    def default_feature_extractor(self):
-        return AutoFeatureExtractor.from_pretrained("hustvl/yolos-small") if is_vision_available() else None
+    def default_image_processor(self):
+        return AutoImageProcessor.from_pretrained("hustvl/yolos-small") if is_vision_available() else None
 
     @slow
     def test_inference_object_detection_head(self):
         model = YolosForObjectDetection.from_pretrained("hustvl/yolos-small").to(torch_device)
 
-        feature_extractor = self.default_feature_extractor
+        image_processor = self.default_image_processor
         image = prepare_img()
-        inputs = feature_extractor(images=image, return_tensors="pt").to(torch_device)
+        inputs = image_processor(images=image, return_tensors="pt").to(torch_device)
 
         # forward pass
         with torch.no_grad():
             outputs = model(inputs.pixel_values)
 
-        # verify the logits
+        # verify outputs
         expected_shape = torch.Size((1, 100, 92))
         self.assertEqual(outputs.logits.shape, expected_shape)
 
@@ -371,3 +373,16 @@ class YolosModelIntegrationTest(unittest.TestCase):
         )
         self.assertTrue(torch.allclose(outputs.logits[0, :3, :3], expected_slice_logits, atol=1e-4))
         self.assertTrue(torch.allclose(outputs.pred_boxes[0, :3, :3], expected_slice_boxes, atol=1e-4))
+
+        # verify postprocessing
+        results = image_processor.post_process_object_detection(
+            outputs, threshold=0.3, target_sizes=[image.size[::-1]]
+        )[0]
+        expected_scores = torch.tensor([0.9994, 0.9790, 0.9964, 0.9972, 0.9861]).to(torch_device)
+        expected_labels = [75, 75, 17, 63, 17]
+        expected_slice_boxes = torch.tensor([335.0609, 79.3848, 375.4216, 187.2495]).to(torch_device)
+
+        self.assertEqual(len(results["scores"]), 5)
+        self.assertTrue(torch.allclose(results["scores"], expected_scores, atol=1e-4))
+        self.assertSequenceEqual(results["labels"].tolist(), expected_labels)
+        self.assertTrue(torch.allclose(results["boxes"][0, :], expected_slice_boxes))

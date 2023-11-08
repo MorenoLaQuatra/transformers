@@ -28,7 +28,6 @@ from ...test_tokenization_common import TokenizerTesterMixin
 
 
 class CanineTokenizationTest(TokenizerTesterMixin, unittest.TestCase):
-
     tokenizer_class = CanineTokenizer
     test_rust_tokenizer = False
 
@@ -80,8 +79,9 @@ class CanineTokenizationTest(TokenizerTesterMixin, unittest.TestCase):
             "What's the weater?",
             "It's about 25 degrees.",
         ]
-        with tokenizer.as_target_tokenizer():
-            targets = tokenizer(tgt_text, max_length=32, padding="max_length", truncation=True, return_tensors="pt")
+        targets = tokenizer(
+            text_target=tgt_text, max_length=32, padding="max_length", truncation=True, return_tensors="pt"
+        )
         self.assertEqual(32, targets["input_ids"].shape[1])
 
     # cannot use default save_and_load_tokenzier test method because tokenzier has no vocab
@@ -122,7 +122,9 @@ class CanineTokenizationTest(TokenizerTesterMixin, unittest.TestCase):
                 # We can add a new special token for Canine as follows:
                 new_additional_special_token = chr(0xE007)
                 additional_special_tokens.append(new_additional_special_token)
-                tokenizer.add_special_tokens({"additional_special_tokens": additional_special_tokens})
+                tokenizer.add_special_tokens(
+                    {"additional_special_tokens": additional_special_tokens}, replace_additional_special_tokens=False
+                )
                 before_tokens = tokenizer.encode(sample_text, add_special_tokens=False)
                 tokenizer.save_pretrained(tmpdirname)
 
@@ -167,11 +169,7 @@ class CanineTokenizationTest(TokenizerTesterMixin, unittest.TestCase):
             with self.subTest(f"{tokenizer.__class__.__name__}"):
                 SPECIAL_TOKEN_1 = chr(0xE005)
                 SPECIAL_TOKEN_2 = chr(0xE006)
-
-                # `add_tokens` method stores special tokens only in `tokenizer.unique_no_split_tokens`. (in tokenization_utils.py)
                 tokenizer.add_tokens([SPECIAL_TOKEN_1], special_tokens=True)
-                # `add_special_tokens` method stores special tokens in `tokenizer.additional_special_tokens`,
-                # which also occur in `tokenizer.all_special_tokens`. (in tokenization_utils_base.py)
                 tokenizer.add_special_tokens({"additional_special_tokens": [SPECIAL_TOKEN_2]})
 
                 token_1 = tokenizer.tokenize(SPECIAL_TOKEN_1)
@@ -187,7 +185,6 @@ class CanineTokenizationTest(TokenizerTesterMixin, unittest.TestCase):
         tokenizers = self.get_tokenizers(do_lower_case=False)
         for tokenizer in tokenizers:
             with self.subTest(f"{tokenizer.__class__.__name__}"):
-
                 # a special token for Canine can be defined as follows:
                 NEW_TOKEN = 0xE006
                 new_token = chr(NEW_TOKEN)
@@ -261,7 +258,6 @@ class CanineTokenizationTest(TokenizerTesterMixin, unittest.TestCase):
         tokenizers = self.get_tokenizers(do_lower_case=False)
         for tokenizer in tokenizers:
             with self.subTest(f"{tokenizer.__class__.__name__}"):
-
                 input = "hello world"
                 if self.space_between_special_tokens:
                     output = "[CLS] hello world [SEP]"

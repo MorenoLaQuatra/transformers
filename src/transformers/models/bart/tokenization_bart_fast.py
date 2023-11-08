@@ -75,12 +75,14 @@ class BartTokenizerFast(PreTrainedTokenizerFast):
     This tokenizer has been trained to treat spaces like parts of the tokens (a bit like sentencepiece) so a word will
     be encoded differently whether it is at the beginning of the sentence (without space) or not:
 
-    ```
+    ```python
     >>> from transformers import BartTokenizerFast
+
     >>> tokenizer = BartTokenizerFast.from_pretrained("facebook/bart-base")
-    >>> tokenizer("Hello world")['input_ids']
+    >>> tokenizer("Hello world")["input_ids"]
     [0, 31414, 232, 2]
-    >>> tokenizer(" Hello world")['input_ids']
+
+    >>> tokenizer(" Hello world")["input_ids"]
     [0, 20920, 232, 2]
     ```
 
@@ -166,8 +168,14 @@ class BartTokenizerFast(PreTrainedTokenizerFast):
         mask_token="<mask>",
         add_prefix_space=False,
         trim_offsets=True,
-        **kwargs
+        **kwargs,
     ):
+        # we have to specify that this tokens is special otherwise adding it will reset the normalized flag to `False` in `add_special_tokens`
+        mask_token = (
+            AddedToken(mask_token, lstrip=True, normalized=True, special=True)
+            if isinstance(mask_token, str)
+            else mask_token
+        )
         super().__init__(
             vocab_file,
             merges_file,
@@ -229,8 +237,9 @@ class BartTokenizerFast(PreTrainedTokenizerFast):
         BART tokenizer has a special mask token to be usable in the fill-mask pipeline. The mask token will greedily
         comprise the space before the *<mask>*.
         """
-        if self._mask_token is None and self.verbose:
-            logger.error("Using mask_token, but it is not set yet.")
+        if self._mask_token is None:
+            if self.verbose:
+                logger.error("Using mask_token, but it is not set yet.")
             return None
         return str(self._mask_token)
 

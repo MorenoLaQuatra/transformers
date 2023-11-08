@@ -56,17 +56,21 @@ class CLIPTokenizerFast(PreTrainedTokenizerFast):
     refer to this superclass for more information regarding those methods.
 
     Args:
-        vocab_file (`str`):
+        vocab_file (`str`, *optional*):
             Path to the vocabulary file.
-        merges_file (`str`):
+        merges_file (`str`, *optional*):
             Path to the merges file.
-        unk_token (`str`, *optional*, defaults to `<|endoftext|>`):
+        tokenizer_file (`str`, *optional*):
+            The path to a tokenizer file to use instead of the vocab file.
+        unk_token (`str`, *optional*, defaults to `"<|endoftext|>"`):
             The unknown token. A token that is not in the vocabulary cannot be converted to an ID and is set to be this
             token instead.
-        bos_token (`str`, *optional*, defaults to `<|endoftext|>`):
+        bos_token (`str`, *optional*, defaults to `"<|startoftext|>"`):
             The beginning of sequence token.
-        eos_token (`str`, *optional*, defaults to `<|endoftext|>`):
+        eos_token (`str`, *optional*, defaults to `"<|endoftext|>"`):
             The end of sequence token.
+        pad_token (`str`, *optional*, defaults to `"<|endoftext|>"`):
+            The token used for padding, for example when batching sequences of different lengths.
     """
 
     vocab_files_names = VOCAB_FILES_NAMES
@@ -84,7 +88,7 @@ class CLIPTokenizerFast(PreTrainedTokenizerFast):
         bos_token="<|startoftext|>",
         eos_token="<|endoftext|>",
         pad_token="<|endoftext|>",  # hack to enable padding
-        **kwargs
+        **kwargs,
     ):
         super().__init__(
             vocab_file,

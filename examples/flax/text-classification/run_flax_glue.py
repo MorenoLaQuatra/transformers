@@ -16,29 +16,31 @@
 """ Finetuning a 🤗 Flax Transformers model for sequence classification on GLUE."""
 import json
 import logging
+import math
 import os
 import random
 import sys
 import time
+import warnings
 from dataclasses import dataclass, field
-from itertools import chain
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional, Tuple
 
 import datasets
-import numpy as np
-from datasets import load_dataset, load_metric
-from tqdm import tqdm
-
+import evaluate
 import jax
 import jax.numpy as jnp
+import numpy as np
 import optax
-import transformers
+from datasets import load_dataset
 from flax import struct, traverse_util
-from flax.jax_utils import replicate, unreplicate
+from flax.jax_utils import pad_shard_unpad, replicate, unreplicate
 from flax.training import train_state
 from flax.training.common_utils import get_metrics, onehot, shard
-from huggingface_hub import Repository
+from huggingface_hub import Repository, create_repo
+from tqdm import tqdm
+
+import transformers
 from transformers import (
     AutoConfig,
     AutoTokenizer,
@@ -48,12 +50,12 @@ from transformers import (
     TrainingArguments,
     is_tensorboard_available,
 )
-from transformers.utils import check_min_version, get_full_repo_name
+from transformers.utils import check_min_version, send_example_telemetry
 
 
 logger = logging.getLogger(__name__)
 # Will error if the minimal version of Transformers is not installed. Remove at your own risks.
-check_min_version("4.20.0.dev0")
+check_min_version("4.36.0.dev0")
 
 Array = Any
 Dataset = datasets.arrow_dataset.Dataset
@@ -100,12 +102,28 @@ class ModelArguments:
         default="main",
         metadata={"help": "The specific model version to use (can be a branch name, tag name or commit id)."},
     )
+    token: str = field(
+        default=None,
+        metadata={
+            "help": (
+                "The token to use as HTTP bearer authorization for remote files. If not specified, will use the token "
+                "generated when running `huggingface-cli login` (stored in `~/.huggingface`)."
+            )
+        },
+    )
     use_auth_token: bool = field(
+        default=None,
+        metadata={
+            "help": "The `use_auth_token` argument is deprecated and will be removed in v4.34. Please use `token` instead."
+        },
+    )
+    trust_remote_code: bool = field(
         default=False,
         metadata={
             "help": (
-                "Will use the token generated when running `transformers-cli login` (necessary to use this script "
-                "with private models)."
+                "Whether or not to allow for custom models defined on the Hub in their own modeling files. This option"
+                "should only be set to `True` for repositories you trust and in which you have read the code, as it will "
+                "execute code present on the Hub on your local machine."
             )
         },
     )
@@ -226,7 +244,15 @@ def create_train_state(
     # The mask is True for parameters that should be decayed.
     def decay_mask_fn(params):
         flat_params = traverse_util.flatten_dict(params)
-        flat_mask = {path: (path[-1] != "bias" and path[-2:] != ("LayerNorm", "scale")) for path in flat_params}
+        # find out all LayerNorm parameters
+        layer_norm_candidates = ["layernorm", "layer_norm", "ln"]
+        layer_norm_named_params = {
+            layer[-2:]
+            for layer_norm_name in layer_norm_candidates
+            for layer in flat_params.keys()
+            if layer_norm_name in "".join(layer).lower()
+        }
+        flat_mask = {path: (path[-1] != "bias" and path[-2:] not in layer_norm_named_params) for path in flat_params}
         return traverse_util.unflatten_dict(flat_mask)
 
     tx = optax.adamw(
@@ -262,7 +288,7 @@ def create_train_state(
 
 def create_learning_rate_fn(
     train_ds_size: int, train_batch_size: int, num_train_epochs: int, num_warmup_steps: int, learning_rate: float
-) -> Callable[[int], jnp.array]:
+) -> Callable[[int], jnp.ndarray]:
     """Returns a linear warmup, linear_decay learning rate function."""
     steps_per_epoch = train_ds_size // train_batch_size
     num_train_steps = steps_per_epoch * num_train_epochs
@@ -290,11 +316,15 @@ def glue_train_data_collator(rng: PRNGKey, dataset: Dataset, batch_size: int):
 
 
 def glue_eval_data_collator(dataset: Dataset, batch_size: int):
-    """Returns batches of size `batch_size` from `eval dataset`, sharded over all local devices."""
-    for i in range(len(dataset) // batch_size):
-        batch = dataset[i * batch_size : (i + 1) * batch_size]
+    """Returns batches of size `batch_size` from `eval dataset`. Sharding handled by `pad_shard_unpad` in the eval loop."""
+    batch_idx = np.arange(len(dataset))
+
+    steps_per_epoch = math.ceil(len(dataset) / batch_size)
+    batch_idx = np.array_split(batch_idx, steps_per_epoch)
+
+    for idx in batch_idx:
+        batch = dataset[idx]
         batch = {k: np.array(v) for k, v in batch.items()}
-        batch = shard(batch)
 
         yield batch
 
@@ -307,6 +337,19 @@ def main():
         model_args, data_args, training_args = parser.parse_json_file(json_file=os.path.abspath(sys.argv[1]))
     else:
         model_args, data_args, training_args = parser.parse_args_into_dataclasses()
+
+    if model_args.use_auth_token is not None:
+        warnings.warn(
+            "The `use_auth_token` argument is deprecated and will be removed in v4.34. Please use `token` instead.",
+            FutureWarning,
+        )
+        if model_args.token is not None:
+            raise ValueError("`token` and `use_auth_token` are both specified. Please set only the argument `token`.")
+        model_args.token = model_args.use_auth_token
+
+    # Sending telemetry. Tracking the example usage helps us better allocate resources to maintain them. The
+    # information sent is the one passed as arguments along with your Python/PyTorch versions.
+    send_example_telemetry("run_glue", model_args, data_args, framework="flax")
 
     # Make one log on every process with the configuration for debugging.
     logging.basicConfig(
@@ -325,13 +368,14 @@ def main():
 
     # Handle the repository creation
     if training_args.push_to_hub:
-        if training_args.hub_model_id is None:
-            repo_name = get_full_repo_name(
-                Path(training_args.output_dir).absolute().name, token=training_args.hub_token
-            )
-        else:
-            repo_name = training_args.hub_model_id
-        repo = Repository(training_args.output_dir, clone_from=repo_name)
+        # Retrieve of infer repo_name
+        repo_name = training_args.hub_model_id
+        if repo_name is None:
+            repo_name = Path(training_args.output_dir).absolute().name
+        # Create repo and retrieve repo_id
+        repo_id = create_repo(repo_name, exist_ok=True, token=training_args.hub_token).repo_id
+        # Clone repo locally
+        repo = Repository(training_args.output_dir, clone_from=repo_id, token=training_args.hub_token)
 
     # Get the datasets: you can either provide your own CSV/JSON training and evaluation files (see below)
     # or specify a GLUE benchmark task (the dataset will be downloaded automatically from the datasets Hub).
@@ -350,7 +394,7 @@ def main():
         raw_datasets = load_dataset(
             "glue",
             data_args.task_name,
-            use_auth_token=True if model_args.use_auth_token else None,
+            token=model_args.token,
         )
     else:
         # Loading the dataset from local csv or json file.
@@ -363,7 +407,7 @@ def main():
         raw_datasets = load_dataset(
             extension,
             data_files=data_files,
-            use_auth_token=True if model_args.use_auth_token else None,
+            token=model_args.token,
         )
     # See more about loading any type of standard or custom dataset at
     # https://huggingface.co/docs/datasets/loading_datasets.html.
@@ -393,17 +437,20 @@ def main():
         model_args.model_name_or_path,
         num_labels=num_labels,
         finetuning_task=data_args.task_name,
-        use_auth_token=True if model_args.use_auth_token else None,
+        token=model_args.token,
+        trust_remote_code=model_args.trust_remote_code,
     )
     tokenizer = AutoTokenizer.from_pretrained(
         model_args.model_name_or_path,
         use_fast=not model_args.use_slow_tokenizer,
-        use_auth_token=True if model_args.use_auth_token else None,
+        token=model_args.token,
+        trust_remote_code=model_args.trust_remote_code,
     )
     model = FlaxAutoModelForSequenceClassification.from_pretrained(
         model_args.model_name_or_path,
         config=config,
-        use_auth_token=True if model_args.use_auth_token else None,
+        token=model_args.token,
+        trust_remote_code=model_args.trust_remote_code,
     )
 
     # Preprocessing the datasets
@@ -429,7 +476,7 @@ def main():
     ):
         # Some have all caps in their config, some don't.
         label_name_to_id = {k.lower(): v for k, v in model.config.label2id.items()}
-        if list(sorted(label_name_to_id.keys())) == list(sorted(label_list)):
+        if sorted(label_name_to_id.keys()) == sorted(label_list):
             logger.info(
                 f"The configuration of the model provided the following label correspondence: {label_name_to_id}. "
                 "Using it!"
@@ -438,7 +485,7 @@ def main():
         else:
             logger.warning(
                 "Your model seems to have been trained with labels, but they don't match the dataset: ",
-                f"model labels: {list(sorted(label_name_to_id.keys()))}, dataset labels: {list(sorted(label_list))}."
+                f"model labels: {sorted(label_name_to_id.keys())}, dataset labels: {sorted(label_list)}."
                 "\nIgnoring the model labels as a result.",
             )
     elif data_args.task_name is None:
@@ -507,8 +554,9 @@ def main():
     rng = jax.random.PRNGKey(training_args.seed)
     dropout_rngs = jax.random.split(rng, jax.local_device_count())
 
-    train_batch_size = training_args.per_device_train_batch_size * jax.local_device_count()
-    eval_batch_size = training_args.per_device_eval_batch_size * jax.local_device_count()
+    train_batch_size = int(training_args.per_device_train_batch_size) * jax.local_device_count()
+    per_device_eval_batch_size = int(training_args.per_device_eval_batch_size)
+    eval_batch_size = per_device_eval_batch_size * jax.device_count()
 
     learning_rate_fn = create_learning_rate_fn(
         len(train_dataset),
@@ -551,9 +599,9 @@ def main():
     p_eval_step = jax.pmap(eval_step, axis_name="batch")
 
     if data_args.task_name is not None:
-        metric = load_metric("glue", data_args.task_name)
+        metric = evaluate.load("glue", data_args.task_name)
     else:
-        metric = load_metric("accuracy")
+        metric = evaluate.load("accuracy")
 
     logger.info(f"===== Starting training ({num_epochs} epochs) =====")
     train_time = 0
@@ -565,7 +613,6 @@ def main():
     total_steps = steps_per_epoch * num_epochs
     epochs = tqdm(range(num_epochs), desc=f"Epoch ... (0/{num_epochs})", position=0)
     for epoch in epochs:
-
         train_start = time.time()
         train_metrics = []
 
@@ -602,31 +649,19 @@ def main():
                 train_metrics = []
 
             if (cur_step % training_args.eval_steps == 0 or cur_step % steps_per_epoch == 0) and cur_step > 0:
-
                 # evaluate
                 eval_loader = glue_eval_data_collator(eval_dataset, eval_batch_size)
                 for batch in tqdm(
                     eval_loader,
-                    total=len(eval_dataset) // eval_batch_size,
+                    total=math.ceil(len(eval_dataset) / eval_batch_size),
                     desc="Evaluating ...",
                     position=2,
                 ):
                     labels = batch.pop("labels")
-                    predictions = p_eval_step(state, batch)
-                    metric.add_batch(predictions=chain(*predictions), references=chain(*labels))
-
-                # evaluate also on leftover examples (not divisible by batch_size)
-                num_leftover_samples = len(eval_dataset) % eval_batch_size
-
-                # make sure leftover batch is evaluated on one device
-                if num_leftover_samples > 0 and jax.process_index() == 0:
-                    # take leftover samples
-                    batch = eval_dataset[-num_leftover_samples:]
-                    batch = {k: np.array(v) for k, v in batch.items()}
-
-                    labels = batch.pop("labels")
-                    predictions = eval_step(unreplicate(state), batch)
-                    metric.add_batch(predictions=predictions, references=labels)
+                    predictions = pad_shard_unpad(p_eval_step)(
+                        state, batch, min_device_batch=per_device_eval_batch_size
+                    )
+                    metric.add_batch(predictions=np.array(predictions), references=labels)
 
                 eval_metric = metric.compute()
 
